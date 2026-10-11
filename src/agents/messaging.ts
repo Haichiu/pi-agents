@@ -145,7 +145,6 @@ async function bind(
   args: { name: string; message: string; followUp?: boolean },
   api: ToolExecutionApi,
   context: Context,
-  options: MessagingOptions,
 ): Promise<Binding | string> {
   const text = args.message.trim();
   if (!text) return "The message must not be empty.";
@@ -262,7 +261,7 @@ export function createMessagingExtension(
           // A rerun replays the first run's binding.
           const bound =
             (await api.memo<Binding>("message", context)) ??
-            (await bind(args, api, context, options));
+            (await bind(args, api, context));
           if (typeof bound === "string") return textResult(bound, true);
           await options.afterBind?.(context);
           const outcome = await hub.turn(bound.to, async () => {
