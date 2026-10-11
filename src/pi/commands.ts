@@ -1,6 +1,7 @@
 /**
  * Slash commands: `/agents` opens the agent overlay, `/agent <name>`
- * attaches to an agent.
+ * attaches to an agent, and `/messages` opens the stream of messages
+ * between agents.
  */
 
 import * as os from "node:os";
@@ -25,6 +26,7 @@ import {
 import {
   type Colorize,
   formatElapsed,
+  formatInputs,
   formatUsage,
   graphNote,
   QUEUED_NOTE,
@@ -35,12 +37,8 @@ import {
   stateIcon,
   statusIcon,
 } from "../ui/format.js";
-import {
-  type Bold,
-  type DetailLine,
-  type OverlaySpec,
-  openOverlay,
-} from "../ui/overlay.js";
+import type { Bold, DetailLine } from "../ui/frame.js";
+import { type OverlaySpec, openOverlay } from "../ui/overlay.js";
 import type { AgentPanel } from "../ui/panel.js";
 import {
   attachTarget,
@@ -50,6 +48,7 @@ import {
   hiddenNote,
   type Row,
 } from "../ui/rows.js";
+import { openMessageStream } from "../ui/stream.js";
 import type { SessionHost } from "./session.js";
 
 /** Lines of an agent's job shown in the overlay's detail pane. */
@@ -77,44 +76,53 @@ function rowTail(
   queued: boolean | undefined,
   color: Colorize,
 ): string {
-  const tail = [usage, queued ? QUEUED_NOTE : ""].filter(Boolean).join("  ");
+  const tail = [usage, queued ? QUEUED_NOTE : ""].filter(Boolean).join(" ");
   return tail ? color("dim", tail) : "";
 }
 
+/** A name in bold, the row's primary information, padded to `width`. */
+function boldName(name: string, width: number, bold: Bold): string {
+  return `${bold(name)}${" ".repeat(Math.max(0, width - name.length))}`;
+}
+
+/** An agent's row: its name in bold, the rest dim. */
 function agentRow(
   agent: AgentInfo,
   now: number,
   nameWidth: number,
   color: Colorize,
+  bold: Bold,
   indent = "",
 ): string {
   const usage = formatUsage(agent.usage);
-  const name = pad(agent.name, nameWidth - indent.length);
+  const name = boldName(agent.name, nameWidth - indent.length, bold);
   return [
-    `${color("dim", indent)}${statusIcon(agent, color)} ${isVisible(agent) ? name : color("dim", name)}`,
+    `${color("dim", indent)}${statusIcon(agent, color)} ${name}`,
     color("dim", pad(agent.profile ?? "ad-hoc", 10)),
     color("dim", pad(shortModel(agent), 14)),
     color("dim", pad(formatElapsed(runtime(agent, now)), 7)),
     rowTail(usage, agent.queued, color),
-  ].join("  ");
+  ].join(" ");
 }
 
+/** A graph's row: its name in bold, the rest dim. */
 function graphRow(
   graph: GraphInfo,
   now: number,
   nameWidth: number,
   color: Colorize,
+  bold: Bold,
   indent = "",
 ): string {
   const usage = formatUsage(graph.usage);
-  const name = pad(graph.name, nameWidth - indent.length);
+  const name = boldName(graph.name, nameWidth - indent.length, bold);
   return [
-    `${color("dim", indent)}${statusIcon(graph, color)} ${isGraphVisible(graph) ? name : color("dim", name)}`,
+    `${color("dim", indent)}${statusIcon(graph, color)} ${name}`,
     color("dim", pad(graph.owner ? "helpers" : "graph", 10)),
     color("dim", pad(`${graph.nodes.length} agents`, 14)),
     color("dim", pad(formatElapsed(runtime(graph, now)), 7)),
     rowTail(usage, graph.queued, color),
-  ].join("  ");
+  ].join(" ");
 }
 
 /** The glyph state of a graph's agent: how its job ended, else its
@@ -169,7 +177,8 @@ export function graphDetail(
     const usage = agent ? formatUsage(agent.usage) : "";
     const meta = [agent ? shortModel(agent) : undefined, usage || undefined]
       .filter(Boolean)
-      .join(" · ");
+      .join(" ");
+    const after = formatInputs(inputs, graph.nodes.length - 1);
     const word =
       outcome?.kind === "stopped" || outcome?.kind === "interrupted"
         ? outcome.kind
@@ -178,9 +187,9 @@ export function graphDetail(
     lines.push(
       [
         `${stateIcon(nodeState(outcome, agent), color)} ${bold(name)}`,
-        inputs.length > 0 ? color("dim", ` ← ${inputs.join(", ")}`) : "",
-        meta ? color("dim", ` · ${meta}`) : "",
-        word ? color("dim", ` · ${word}`) : "",
+        after ? color("dim", ` ${after}`) : "",
+        meta ? color("dim", ` ${meta}`) : "",
+        word ? color("dim", ` ${word}`) : "",
       ].join(""),
     );
     if (outcome?.kind === "answered") {
@@ -198,7 +207,7 @@ export function graphDetail(
           indent: 2,
           maxLines: DETAIL_NODE_LINES,
           more: (hidden) =>
-            `… ${hidden} more lines · select ${name} to read all`,
+            `… ${hidden} more lines (select ${name} to read all)`,
         });
     } else if (outcome?.kind === "failed") {
       lines.push(color("error", `  ${outcome.reason}`));
@@ -219,15 +228,15 @@ function tildePath(path: string): string {
     : path;
 }
 
-/** The divider over an agent's job: `Job · name · started … · cwd`. */
+/** The divider over an agent's job: `Job name started … ago in cwd`. */
 export function agentHeader(
   agent: AgentInfo,
   color: Colorize,
   now: number = Date.now(),
 ): string {
-  return `${color("accent", "Job")}${color(
+  return `${color("accent", "Job")} ${agent.name}${color(
     "dim",
-    ` · ${agent.name} · started ${formatElapsed(now - agent.createdAt)} ago · ${tildePath(agent.cwd)}`,
+    ` started ${formatElapsed(now - agent.createdAt)} ago in ${tildePath(agent.cwd)}`,
   )}`;
 }
 
@@ -259,10 +268,10 @@ export function agentDetail(
     const when =
       result.at === undefined
         ? ""
-        : color("dim", ` · ${formatElapsed(now - result.at)} ago`);
+        : color("dim", ` ${formatElapsed(now - result.at)} ago`);
     const label =
       result.entryId === agent.jobAnswer ? "Result" : "Latest result";
-    const queued = agent.queued ? color("dim", ` · ${QUEUED_NOTE}`) : "";
+    const queued = agent.queued ? color("dim", `, ${QUEUED_NOTE}`) : "";
     lines.push(
       { divider: `${color("accent", label)}${when}${queued}` },
       {
@@ -273,6 +282,42 @@ export function agentDetail(
     );
   }
   return lines;
+}
+
+/**
+ * `/messages`: every message between agents, newest first (see
+ * `src/ui/stream.ts`). With `agent`, it starts filtered by that agent's
+ * name; with `message`, at that message.
+ */
+async function openMessagesOverlay(
+  ctx: ExtensionContext,
+  deps: CommandDeps,
+  options: { message?: string; agent?: string } = {},
+): Promise<void> {
+  const service = await deps.host.ensure(ctx);
+  const agentName = options.agent
+    ? service.agentById(options.agent)?.name
+    : undefined;
+  const fail = (error: unknown) => ctx.ui.notify(errorText(error), "error");
+  const agents = () => void openAgentsOverlay(ctx, deps).catch(fail);
+  await openMessageStream(
+    ctx,
+    {
+      messages: () => service.messages(),
+      ...(agentName ? { query: agentName } : {}),
+      ...(options.message ? { select: options.message } : {}),
+      emptyText: "No messages between agents yet.",
+      attach: (agentId) => deps.focus.attach(ctx, agentId),
+      next: deps.panel.hasRows()
+        ? { label: "panel", open: () => deps.focus.focusPanel(ctx) }
+        : { label: "/agents", open: agents },
+      previous: { label: "/agents", open: agents },
+      live: () =>
+        service.messages().some((message) => message.status === "queued") ||
+        service.list().some((agent) => agent.state === "working"),
+    },
+    deps.panel,
+  );
 }
 
 async function openAgentsOverlay(
@@ -302,13 +347,19 @@ async function openAgentsOverlay(
   const spec: OverlaySpec<Row> = {
     title: "Agents",
     emptyText: "No agents yet. Ask Pi to delegate.",
-    // Tab returns to the panel only while it shows agents.
-    footer: () =>
-      `↑↓ move · space fold · ⏎ attach · s stop${deps.panel.hasRows() ? " · tab panel" : ""} · esc`,
+    footer: () => [
+      "↑↓ move",
+      "space fold",
+      "⏎ attach",
+      "s stop",
+      "m messages",
+      "tab /messages",
+      "esc back",
+    ],
     ...(select ? { initialKey: select } : {}),
     items,
     keyOf: (row) => row.key,
-    row: (row, color) => {
+    row: (row, color, bold) => {
       const width = Math.max(...items().map((item) => rowName(item).length), 4);
       const line =
         row.kind === "graph"
@@ -317,6 +368,7 @@ async function openAgentsOverlay(
               Date.now(),
               width,
               color,
+              bold,
               connector(row),
             )
           : agentRow(
@@ -324,34 +376,54 @@ async function openAgentsOverlay(
               Date.now(),
               width,
               color,
+              bold,
               connector(row),
             );
       const hidden = hiddenNote(row);
-      return hidden ? `${line}  ${color("dim", hidden)}` : line;
+      return hidden ? `${line} ${color("dim", hidden)}` : line;
     },
     headerLine: (row, color) => {
       if (row.kind === "agent") return agentHeader(row.agent, color);
       const graph = row.graph;
       const note = graphNote(graph);
-      return color(
+      return `${graph.name}${color(
         "dim",
-        [
-          `${graph.name} · graph of ${graph.nodes.length}`,
+        ` ${[
+          `graph of ${graph.nodes.length}`,
           graph.policy === "failFast" ? "stops on failure" : "waits for all",
           ...(note ? [note] : []),
           `started ${formatElapsed(Date.now() - graph.createdAt)} ago`,
-        ].join(" · "),
-      );
+        ].join(", ")}`,
+      )}`;
     },
     detail: (row, color, bold) =>
       row.kind === "agent"
         ? agentDetail(row.agent, color)
         : graphDetail(row.graph, (id) => service.agentById(id), color, bold),
+    // Tab goes on to /messages, Shift+Tab back to the panel, or to
+    // /messages while the panel has nothing to show.
+    onNavigate: (key, row) => {
+      if (key === "shift+tab" && deps.panel.hasRows()) {
+        after = () =>
+          row
+            ? deps.focus.focusPanelAt(ctx, row.key)
+            : deps.focus.focusPanel(ctx);
+        return "close";
+      }
+      after = () =>
+        void openMessagesOverlay(ctx, deps).catch((error) =>
+          ctx.ui.notify(errorText(error), "error"),
+        );
+      return "close";
+    },
     onAction: (key, row) => {
       if (key === "space") return { select: fold(row, deps.panel.disclosure) };
-      if (key === "tab") {
-        if (!deps.panel.hasRows()) return undefined;
-        after = () => deps.focus.focusPanelAt(ctx, row.key);
+      if (key === "m") {
+        const agent = row.kind === "agent" ? row.agent.id : undefined;
+        after = () =>
+          void openMessagesOverlay(ctx, deps, agent ? { agent } : {}).catch(
+            (error) => ctx.ui.notify(errorText(error), "error"),
+          );
         return "close";
       }
       if (key === "enter") {
@@ -389,15 +461,40 @@ async function openAgentsOverlay(
   after?.();
 }
 
+/** Whether the views can open: they need Pi's terminal UI, which RPC
+ * clients don't render. Says so where it can. */
+function inTerminal(ctx: ExtensionContext, command: string): boolean {
+  if (ctx.mode === "tui") return true;
+  if (ctx.hasUI) ctx.ui.notify(`${command} needs Pi's terminal UI.`, "warning");
+  return false;
+}
+
 export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
   deps.focus.onBrowse = (ctx, select) =>
     void openAgentsOverlay(ctx, deps, select).catch((error) =>
       ctx.ui.notify(errorText(error), "error"),
     );
+  deps.focus.onMessages = (ctx, options) =>
+    void openMessagesOverlay(ctx, deps, options).catch((error) =>
+      ctx.ui.notify(errorText(error), "error"),
+    );
+
+  pi.registerCommand("messages", {
+    description: "Read the messages agents sent each other",
+    handler: async (_args, ctx) => {
+      if (!inTerminal(ctx, "/messages")) return;
+      try {
+        await openMessagesOverlay(ctx, deps);
+      } catch (error) {
+        ctx.ui.notify(errorText(error), "error");
+      }
+    },
+  });
 
   pi.registerCommand("agents", {
     description: "Browse agents: attach to or stop them",
     handler: async (_args, ctx) => {
+      if (!inTerminal(ctx, "/agents")) return;
       try {
         await openAgentsOverlay(ctx, deps);
       } catch (error) {
@@ -427,6 +524,7 @@ export function registerCommands(pi: ExtensionAPI, deps: CommandDeps): void {
           }));
     },
     handler: async (args, ctx) => {
+      if (!inTerminal(ctx, "/agent")) return;
       const name = args.trim();
       if (!name) {
         await openAgentsOverlay(ctx, deps).catch((error) =>

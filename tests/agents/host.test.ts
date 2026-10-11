@@ -31,6 +31,7 @@ import {
   lastUserText,
   MODEL,
   openService,
+  TEST_REFRESH_MS,
   TestParent,
   testExtensions,
 } from "./helpers.js";
@@ -75,6 +76,7 @@ describe("hosts", () => {
       anchor,
       extensions,
       parent: new TestParent(),
+      refreshDelayMs: TEST_REFRESH_MS,
     });
     cleanups.push(() => service.close());
     harness.resume();
@@ -149,6 +151,7 @@ describe("hosts", () => {
       anchor: await harness.root(CONTEXT),
       extensions,
       parent: new TestParent(),
+      refreshDelayMs: TEST_REFRESH_MS,
     });
     cleanups.push(() => service.close());
     harness.resume();
@@ -163,10 +166,15 @@ describe("hosts", () => {
     expect(service.get("lead")?.result?.text).toBe("merged");
 
     const ours = [extensions.tools.name, extensions.prompt.name];
+    // Agents can message each other; helpers can't.
+    const messaging = [...ours, extensions.messaging.name];
     for (const [name, selected] of [
-      ["solo", ours],
-      ["x", ours],
-      ["lead", [...ours, extensions.delegation.name]],
+      ["solo", messaging],
+      ["x", messaging],
+      [
+        "lead",
+        [...ours, extensions.delegation.name, extensions.messaging.name],
+      ],
       ["lead.h", ours],
     ] as const) {
       const id = Number(service.get(name)?.id) as ConversationId;

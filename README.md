@@ -51,49 +51,62 @@ that finished hours ago, and keep talking to it like a regular Pi session.
 ### Architecture
 
 Agents run inside your Pi process. Pi-agents keeps one pi-durable harness per
-Pi session. Each agent is a conversation in that harness, and each graph a
-durable task, pi-durable's unit of work that survives restarts, which starts
-its agents and passes their results along:
+Pi session, with its own store, kept apart from Pi's session file:
 
 ```text
 ╭─ Pi process ─────────────────────────────────────────────────────╮
 │                                                                  │
 │  ╭──────────────────╮                    ╭────────────────────╮  │
-│  │  ◆ Pi session    │                    │  ▤ panel           │  │
-│  ╰───┬──────────▲───╯                    │  ⇄ attach view     │  │
-│      │ agent_*  │ results                │  ≡ /agents         │  │
-│      ▼          │                        ╰─────────▲──────────╯  │
-│  ╭──────────────┴───╮                              │             │
-│  │  ✦ pi-agents     ├──────────────────────────────╯             │
-│  ╰───┬──────────▲───╯                                            │
-│      │ start    │ state                                          │
-│      │ message  │ results                                        │
-│      ▼ stop     │                                                │
-│  ╭──────────────┴─────────────────────────────────────────────╮  │
-│  │  pi-durable harness                                        │  │
-│  │                                                            │  │
-│  │   ◉ agent     ╭─ graph ─────────────────────────╮          │  │
-│  │               │ ● map ─┬─▶ ◉ core ─┬─▶ ○ report │          │  │
-│  │   ● agent     │        └─▶ ◉ ui ───┘            │          │  │
-│  │               │            └─ ◉ ◉ ◉ helpers     │          │  │
-│  │   …           ╰─────────────────────────────────╯          │  │
-│  │                                                            │  │
-│  │   agents are conversations; a graph is a durable task      │  │
-│  │   that starts them in order and passes their results on    │  │
-│  ╰─────────────────────────────┬──────────────────────────────╯  │
-╰────────────────────────────────┼─────────────────────────────────╯
-                                 │ checkpoint every step
-                                 ▼
-                   ╭───────────────────────────╮
-                   │  ▤ JSONL, one per session │
-                   ╰───────────────────────────╯
+│ ╭┤  ◆ Pi session    │                    │  ▤ panel           │  │
+│ ┊╰───┬──────────▲───╯                    │  ⇄ attach view     │  │
+│ ┊    │ agent_*  │ results                │  ≡ /agents         │  │
+│ ┊    ▼          │                        │  ✉ /messages       │  │
+│ ┊╭──────────────┴───╮                    ╰─────────▲──────────╯  │
+│ ┊│  ✦ pi-agents     ├◀─────────────────────────────╯             │
+│ ┊╰───┬──────────▲───╯                                            │
+│ ┊    │ start    │ state                                          │
+│ ┊    │ message  │ results                                        │
+│ ┊    ▼ stop     │                                                │
+│ ┊╭──────────────┴─────────────────────────────────────────────╮  │
+│ ┊│  pi-durable harness                                        │  │
+│ ┊│                                                            │  │
+│ ┊│   ◉ scout ─── message ──▶ ● notes                          │  │
+│ ┊│                                                            │  │
+│ ┊│   ╭─ graph ─────────────────────────╮                      │  │
+│ ┊│   │ ● map ─┬─▶ ◉ core ─┬─▶ ○ report │                      │  │
+│ ┊│   │        └─▶ ◉ ui ───┘            │                      │  │
+│ ┊│   │            └─ ◉ ◉ ◉ helpers     │                      │  │
+│ ┊│   ╰─────────────────────────────────╯                      │  │
+│ ┊│                                                            │  │
+│ ┊│   agents are conversations; turns, tool calls, and graphs  │  │
+│ ┊│   are durable tasks that own what they start               │  │
+│ ┊╰─────────────────────────────┬──────────────────────────────╯  │
+╰─┬──────────────────────────────┬─────────────────────────────────╯
+  ┊ saves                        │ checkpoint every step
+  ▼                              ▼
+╭──────────────────────╮    ╭──────────────────────────────╮
+│ ▤ Pi's session file  │    │ ▤ pi-agents store, one per   │
+│   your conversation, │    │   session: agents, graphs,   │
+│   saved results, and │    │   messages, tasks            │
+│   message cards      │    │                              │
+╰──────────────────────╯    ╰──────────────────────────────╯
 ```
 
-A graph owns its agents, so stopping a graph reaches all of them. An agent
-that delegates starts its helpers as a graph of its own, owned by the call
-that waits for them. Because pi-durable checkpoints every step, a resumed
-session continues where its agents and graphs stopped. Agents use your Pi
-logins and models, so they need no separate setup.
+Each agent is a conversation in the harness. The work on agents runs as
+durable tasks: each turn of an agent, each tool call, and each graph with one
+task per agent in it. A task owns what it starts, so stopping a graph reaches
+all of its agents, and an agent that delegates starts its helpers as a graph
+owned by the tool call that waits for them. A message from one agent to
+another is an input to the recipient's conversation, sent by the sender's
+tool call.
+
+Every step is a commit to the pi-agents store. When you resume a session,
+tasks continue where they stopped: agents that finished don't work again, and
+a call that already started something finds it instead of starting it twice.
+Results reach your conversation through Pi's session file, a separate store,
+so a result counts as delivered once Pi saved it there (see
+[Durability](#durability)). Agents use your Pi logins and models, so they
+need no separate setup.
 
 ### Glossary
 
@@ -172,19 +185,28 @@ Have three reviewer agents review this branch: correctness, tests, and docs.
 
 ### Watch and talk to agents
 
-A panel above the editor shows one line per open agent or graph, with a
-graph's agents below it as a tree. The glyph shows the state, working agents
-show how long ago they started, a graph shows how many of its agents
-finished, and `←` names the agents whose results an agent receives:
+A line above the editor shows how many agents are in each state:
 
 ```text
-◉ reviewer · explorer · terra · 1m32s · 15.5k · Using grep
-✗ docs · sol · 8.0k · $0.02 · rate limit exceeded
-◉ review · graph 1/4 · 40s · 12.0k
-├─ ● api · terra · 4.0k
-├─ ◉ tests · sol · 40s · 8.0k · Using grep
-├─ ◉ host · sol · 40s
-└─ ○ merge ← api, tests, host · opus
+◉ 3 working ✗ 1 failed · ← agents
+```
+
+Press ← in an empty editor, Ctrl+Q, or click the line to focus the panel. It
+then shows one line per open agent or graph, with a graph's agents below it
+as a tree. The glyph shows the state, working agents show how long ago they
+started, a graph shows how many of its agents finished, and `after` names
+the agents whose results an agent receives, `after all` when it waits for
+every other agent of its graph. Names are in the normal color and details
+dim:
+
+```text
+◉ reviewer explorer terra 1m32s 15.5k Using grep
+✗ docs sol 8.0k $0.02 rate limit exceeded
+◉ review graph 1/4 40s 12.0k
+├─ ● api terra 4.0k
+├─ ◉ tests sol 40s 8.0k Using grep
+├─ ◉ host sol 40s
+└─ ○ merge after all opus
 ```
 
 An agent leaves the panel once its answer reaches Pi, and a graph once its
@@ -193,22 +215,23 @@ attached, so until then an agent that answered Pi shows `●` in the accent
 color instead of green and says `result queued`, and so does a graph:
 
 ```text
-● series-review · sol · 1.1m · $0.42 · result queued
+● series-review sol 1.1m $0.42 result queued
 ```
 
 Failed and interrupted agents stay until you or Pi stop them.
 
-Press ← in an empty editor or Ctrl+Q to focus the panel. When no agents are
-open, they open `/agents` instead. Then:
+When no agents are open, ← and Ctrl+Q open `/agents` instead. In the
+focused panel:
 
 | Key | Action |
 | --- | --- |
 | ↑ ↓ | Select an agent or graph. |
 | Space | Fold or unfold a graph, or an agent's helpers. On a row inside one, fold what it sits in. |
 | ⏎ | Attach to the agent, or to a graph's first agent. |
-| Tab | Open `/agents` at the same row. Tab there returns to the panel while agents are open. |
+| Click | Attach like ⏎; a message attaches to its recipient. Needs Pi's fullscreen mode, its default. |
+| Tab | Open `/agents` at the same row. Tab cycles the panel, `/agents`, and `/messages`; Shift+Tab goes back. |
 | `s` | Stop the agent, or the graph with its agents. Pi asks first when it still works. |
-| Esc | Return to the editor. |
+| Esc or → | Go back to the editor. Typing goes back too, with what you type. |
 
 Attaching shows the agent's conversation with Pi's own message and tool
 rendering. The editor then talks to the agent:
@@ -217,9 +240,9 @@ rendering. The editor then talks to the agent:
 | --- | --- |
 | ⏎ | Prompt an idle agent or steer a working one. |
 | Alt+⏎ | Queue a follow-up after the current answer. |
-| Esc | Interrupt a working agent. Queued messages return to the editor. |
+| Esc | Interrupt a working agent; queued messages return to the editor. Go back from an idle one when the editor is empty. |
 | Ctrl+O | Expand or collapse tool output. |
-| ← | Detach when the editor is empty. |
+| ← or Ctrl+D | Detach when the editor is empty. |
 | Shift+↑ ↓, Shift+PgUp/PgDn | Scroll. |
 
 Messages you send while attached stay between you and the agent. Their
@@ -250,7 +273,7 @@ single last agent, such as a merging one, Pi gets just its answer, and the
 results in between stay in the graph, where you can attach to read them:
 
 ```text
-● review › merge answered · opus · 6.2k
+● review › merge answered opus 6.2k
   Three issues stand out: …
 ✗ host failed: rate limit exceeded
 ```
@@ -288,12 +311,12 @@ started them, never to Pi, and only that agent's final answer reports back.
 The panel draws the helpers below their agent, which shows their progress:
 
 ```text
-◉ mapper · haiku · 17s · delegating · helpers 1/4
-└─ ◉ helpers · graph 1/4 · 10s · 13.0k
-   ├─ ● models · haiku · 3.1k
-   ├─ ◉ paths · haiku · 10s
-   ├─ ◉ skills · haiku · 10s
-   └─ ○ merge ← models, paths, skills · haiku
+◉ mapper haiku 17s delegating helpers 1/4
+└─ ◉ helpers graph 1/4 10s 13.0k
+   ├─ ● models haiku 3.1k
+   ├─ ◉ paths haiku 10s
+   ├─ ◉ skills haiku 10s
+   └─ ○ merge after all haiku
 ```
 
 Helpers leave the panel once their agent has their results; `/agents` keeps
@@ -314,12 +337,64 @@ below the agent, and the divider over its details in `/agents` shows it.
 - One call starts at most 12 helpers, an agent at most 24 in total, and at
   most 16 helpers work at once in a session.
 
+### Messages between agents
+
+<img src="demo/messaging.gif" width="840" alt="Scout messages fixer about a concurrency bug, fixer patches it and replies, and Pi browses their exchange in /messages and attaches to both agents">
+
+Agents message each other. Each gets `agent_status`, which lists the other
+agents with the jobs they were started with, and `agent_send`, which sends
+one of them a message without waiting. Like your messages, it steers a
+working recipient, so it can change what the recipient answers, unless the
+sender queues it as a follow-up. The recipient's answer stays with it.
+Helpers can't send or receive messages, and an agent you or Pi stopped
+refuses messages from agents until you or Pi message it.
+
+Every message shows in the transcript as a card marked `✦`, like pi-agents'
+tool calls, where Pi's model doesn't see it. The focused panel shows messages
+still waiting in their recipient's queue, next to the agents, or below them
+in terminals narrower than 120 columns:
+
+```text
+◉ scout sol 40s 8.1k   scout → notes README.md is 18 KB 3s
+```
+
+Their text is dim, so the names stand out; a first row counts older ones
+that don't fit. In the attach view, a message is dim while it waits in the
+agent's queue, like your queued input, and leaves the view if interrupting
+or stopping the agent drops it; `/messages` shows dropped messages in red.
+In the focused panel, ↑↓ reach the messages, ⏎ attaches to a message's
+recipient, and `m` opens `/messages` at the selected message, or filtered by
+the selected agent's name.
+
+`/messages` shows every message in one stream, newest first, one line each:
+
+```text
+╭─ Messages (3) ───────────────────────────────────────────────────────╮
+│   14:33:46 gamma → beta Serve wraps                                  │
+│   14:33:17 beta → alpha Location proposal: reserve the central lawn… │
+│ ▸ 14:32:47 alpha → gamma Offer two inclusive picnic activities:      │
+├──────────────────────────────────────────────────────────────────────┤
+│ Offer two inclusive picnic activities:                               │
+│                                                                      │
+│ - a relaxed nature-scavenger hunt with seated options                │
+│ - a collaborative mural                                              │
+╰─ ↑↓ move · ⏎ close · ← alpha · → gamma · tab panel · esc close ──────╯
+```
+
+The text is dim, so the names stand out, and red if the message was
+dropped. Type to filter by text and names, such as an agent's name. ⏎ opens the
+selected message in full below the list and closes it again. ← attaches to
+the sender and → to the recipient, in the order the line names them. Esc
+closes the message, then clears the filter, then closes `/messages`. A
+session keeps its latest 1,000 messages.
+
 ### Commands
 
 | Command | Action |
 | --- | --- |
 | `/agents` | Browse all agents and graphs, including ended ones, with their jobs and latest results. Attach to, fold, or stop them. |
 | `/agent <name>` | Attach to an agent. |
+| `/messages` | Read and filter the messages agents sent each other, newest first. |
 
 ### Tools
 
@@ -327,18 +402,19 @@ Pi uses these tools to work with agents:
 
 | Tool | Purpose |
 | --- | --- |
-| `agent_spawn` | Start an agent on a job, optionally waiting for its result, and optionally letting it delegate. |
-| `agent_spawn_graph` | Start a graph of agents, optionally waiting for its result. |
+| `agent_spawn` | Start an agent on a job, optionally letting it delegate. |
+| `agent_spawn_graph` | Start a graph of agents. |
 | `agent_send` | Message an agent: prompt, steer, or queue a follow-up. |
 | `agent_wait` | Block until agents or graphs answer and return their results. |
 | `agent_status` | Show agent and graph states. |
 | `agent_stop` | Stop an agent or a graph. |
 
-`agent_spawn`, `agent_spawn_graph`, and `agent_send` can also block for the
-result: their `wait` argument sets the most seconds to wait. A result that a
-wait returns doesn't post again as a message. Cancelling a wait leaves the
-agents working, and so does a message you send to Pi while it waits: Pi
-stops waiting and answers you right away.
+`agent_spawn`, `agent_spawn_graph`, and `agent_send` return at once, and
+results arrive as messages. Only `agent_wait` blocks: until the agents
+answer, or at most its `timeout` in seconds. A result that a wait returns
+doesn't post again as a message. Cancelling a wait leaves the agents
+working, and so does a message you send to Pi while it waits: Pi stops
+waiting and answers you right away.
 
 With [codemode](https://pi.dev/docs/latest/codemode), scripts get the
 results as data instead of text: an agent's `name`, `state`, and `result`
@@ -355,11 +431,10 @@ const { agents, pending } = await tools.agent_wait({ names, timeout: 600 });
 return { failed: agents.filter((a) => a.state === "failed"), pending };
 ```
 
-Each tool call shows the arguments Pi chose on a dim line below it:
+Each tool call shows the arguments Pi chose, dim, after its title:
 
 ```text
-✦ spawn lister
-  profile=explorer thinking=low tools=[read,ls] wait=120s
+✦ spawn lister profile=explorer thinking=low tools=[read,ls]
   List the files in src and summarize them.
 ```
 
@@ -375,8 +450,9 @@ conversation. A result has arrived once Pi saved it in the session, so a crash
 never loses one; a result that Pi showed but hadn't saved yet posts again, and
 after a crash, so may a result that a codemode script waited for. A graph
 continues too: its agents that already finished don't work again, and no
-agent gets its job twice. A tool call that can't safely repeat reports the
-interruption to the agent instead.
+agent gets its job twice. A message from one agent to another reaches its
+recipient once, also when Pi crashes while sending it. A tool call that
+can't safely repeat reports the interruption to the agent instead.
 
 Agents of sessions started with `--no-session` live in memory and end with
 the session.

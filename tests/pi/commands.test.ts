@@ -18,7 +18,7 @@ import {
   type DetailLine,
   paneLayout,
   renderDetail,
-} from "../../src/ui/overlay.js";
+} from "../../src/ui/frame.js";
 
 beforeAll(() => initTheme("dark"));
 
@@ -118,14 +118,14 @@ describe("/agents detail", () => {
       ),
     );
     expect(lines).toEqual([
-      "● a · sol · 2.0k",
+      "● a sol 2.0k",
       "  - High: x breaks.",
       "    Fix: guard it.",
       "",
-      "✗ b · sol · 2.0k",
+      "✗ b sol 2.0k",
       "  rate limited",
       "",
-      "⊘ c · sol · 2.0k · stopped",
+      "⊘ c sol 2.0k stopped",
     ]);
   });
 
@@ -151,7 +151,7 @@ describe("/agents detail", () => {
     expect(lines).toEqual([
       "The result waits until Pi's turn ends.",
       "",
-      "✗ lead.a · sol · 2.0k",
+      "✗ lead.a sol 2.0k",
       "  rate limited",
     ]);
   });
@@ -171,7 +171,7 @@ describe("/agents detail", () => {
       ),
     );
     expect(lines.slice(0, 2)).toEqual(["Runs a, then b.", ""]);
-    expect(lines[4]).toBe("● b ← a · sol · 2.0k");
+    expect(lines[4]).toBe("● b after a sol 2.0k");
   });
 
   test("long results end in a line that says how to read the rest", () => {
@@ -194,7 +194,7 @@ describe("/agents detail", () => {
       ),
     );
     expect(lines).toHaveLength(10);
-    expect(lines.at(-1)).toBe("  … 12 more lines · select lead.a to read all");
+    expect(lines.at(-1)).toBe("  … 12 more lines (select lead.a to read all)");
   });
 
   test("a divider separates an agent's job from its result", () => {
@@ -204,7 +204,7 @@ describe("/agents detail", () => {
       stripVTControlCharacters(
         agentHeader(agent({ cwd: `${os.homedir()}/repo` }), plainColorize, at),
       ),
-    ).toBe("Job · a · started 1m00s ago · ~/repo");
+    ).toBe("Job a started 1m00s ago in ~/repo");
     // The task renders as Markdown; the answer to it is its result.
     expect(
       plain(
@@ -218,13 +218,7 @@ describe("/agents detail", () => {
           at,
         ),
       ),
-    ).toEqual([
-      "Review a:",
-      "",
-      "- read a.ts",
-      "├─ Result · 1m00s ago",
-      "done",
-    ]);
+    ).toEqual(["Review a:", "", "- read a.ts", "├─ Result 1m00s ago", "done"]);
     // An answer to a later message is the latest result.
     expect(
       plain(
@@ -234,7 +228,7 @@ describe("/agents detail", () => {
           at,
         ),
       ),
-    ).toEqual(["review a", "├─ Latest result · 1m00s ago", "done"]);
+    ).toEqual(["review a", "├─ Latest result 1m00s ago", "done"]);
     // An answer that waits for Pi says so.
     expect(
       plain(
@@ -244,7 +238,7 @@ describe("/agents detail", () => {
           at,
         ),
       ),
-    ).toEqual(["review a", "├─ Result · 1m00s ago · result queued", "done"]);
+    ).toEqual(["review a", "├─ Result 1m00s ago, result queued", "done"]);
     expect(
       plain(
         agentDetail(

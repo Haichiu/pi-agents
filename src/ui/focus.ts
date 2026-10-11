@@ -6,7 +6,10 @@
  *   editor ── ← (empty editor) / ctrl+q ──▶ panel, or /agents if it's empty
  *   panel  ── esc / → / typing ──▶ editor
  *   panel  ── ⏎ ──▶ attach view (ctx.ui.custom owns focus until it closes)
- *   panel  ◀─ tab ─▶ /agents, at the same row (back only while agents are open)
+ *   panel  ── tab ──▶ /agents ── tab ──▶ /messages ── tab ──▶ panel
+ *   panel  ── shift+tab ──▶ /messages, the cycle backwards
+ *   panel  ── m ──▶ /messages at the selected message, or filtered by the
+ *                   selected agent's name
  *
  * It also owns attaching, so the panel, the overlay, and `/agent` share one
  * path that hides the panel and holds deliveries while attached.
@@ -18,7 +21,7 @@ import type { AgentInfo } from "../agents/types.js";
 import type { SessionHost } from "../pi/session.js";
 import { openAgentPane } from "./attach.js";
 import type { AgentPanel } from "./panel.js";
-import { attachTarget, type Row } from "./rows.js";
+import type { Row } from "./rows.js";
 
 /** True for text a user typed: no escape introducer, no control bytes. */
 function isPrintable(data: string): boolean {
@@ -69,6 +72,13 @@ export class FocusController {
   /** Opens `/agents`, at the row with key `select` if given: for ← and
    * Ctrl+Q while the panel is empty, and for Tab from the panel. */
   onBrowse: ((ctx: ExtensionContext, select?: string) => void) | undefined;
+  /** Opens `/messages`, at a message or filtered by an agent. */
+  onMessages:
+    | ((
+        ctx: ExtensionContext,
+        options: { message?: string; agent?: string },
+      ) => void)
+    | undefined;
   /** Invoked after the attach view closes (deliver held results, etc.). */
   onPaneClosed: ((ctx: ExtensionContext) => void) | undefined;
   /** Some terminal stacks hand the same chunk to listeners twice. */
@@ -135,6 +145,11 @@ export class FocusController {
 
   isPaneOpen(): boolean {
     return this.paneOpen;
+  }
+
+  /** Attach to an agent in the current session, such as on a click. */
+  attachTo(agentId: string): void {
+    if (this.ctx) this.attach(this.ctx, agentId);
   }
 
   /** Open the attach view for an agent. */
@@ -214,8 +229,8 @@ export class FocusController {
       return { consume: true };
     }
     if (keybindings.matches(data, "tui.select.confirm")) {
-      const row = this.panel.selected();
-      const agentId = row ? attachTarget(row) : undefined;
+      // A row attaches to its agent, a message to its recipient.
+      const agentId = this.panel.attachTarget();
       if (agentId) this.attach(ctx, agentId);
       return { consume: true };
     }
@@ -223,11 +238,35 @@ export class FocusController {
       this.panel.toggle();
       return { consume: true };
     }
-    // Tab trades the panel for /agents at the same row; Tab there trades back.
+    // Tab cycles panel, /agents, and /messages; /agents opens at the row.
     if (key === "tab" && this.onBrowse) {
       const row = this.panel.selected();
       this.panel.setFocused(false);
       this.onBrowse(ctx, row?.key);
+      return { consume: true };
+    }
+    const messages = this.onMessages;
+    // Shift+Tab goes back to /messages, never on to Pi, where it changes
+    // the thinking level.
+    if (key === "shift+tab") {
+      this.panel.setFocused(false);
+      messages?.(ctx, {});
+      return { consume: true };
+    }
+    // m opens messages at the selected message, or filtered by the
+    // selected agent's name.
+    if (key === "m" && messages) {
+      const message = this.panel.selectedMessage();
+      const row = this.panel.selected();
+      this.panel.setFocused(false);
+      messages(
+        ctx,
+        message
+          ? { message: message.id }
+          : row?.kind === "agent"
+            ? { agent: row.agent.id }
+            : {},
+      );
       return { consume: true };
     }
     if (key === "s") {

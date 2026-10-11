@@ -31,7 +31,9 @@ function setup(state: {
   const service = {
     list: () => Array.from({ length: state.agents }),
   } as unknown as AgentService;
-  const host = { current: () => service } as unknown as SessionHost;
+  const host = {
+    current: () => service,
+  } as unknown as SessionHost;
   const ctx = {
     mode: "tui",
     ui: {
@@ -45,6 +47,8 @@ function setup(state: {
   const focus = new FocusController(host, panel);
   const browsed: Array<string | undefined> = [];
   focus.onBrowse = (_context, select) => browsed.push(select);
+  const messages: unknown[] = [];
+  focus.onMessages = (_context, options) => messages.push(options);
   focus.install(ctx);
   // Distinct presses, so the duplicate-chunk guard doesn't merge them; a
   // terminal focus report is neither a key nor text.
@@ -53,7 +57,7 @@ function setup(state: {
     input?.("\u001b[I");
     return result;
   };
-  return { press, focused, browsed };
+  return { press, focused, browsed, messages };
 }
 
 describe("focus", () => {
@@ -122,7 +126,7 @@ describe("focus", () => {
     expect(panel.hasOverlay()).toBe(false);
   });
 
-  test("Tab trades the focused panel for /agents at the same row", () => {
+  test("Tab trades the panel for /agents at the same row, Shift+Tab for /messages", () => {
     const { press, focused, browsed } = setup({
       rows: true,
       agents: 2,
@@ -132,5 +136,15 @@ describe("focus", () => {
     expect(press("\t")).toEqual({ consume: true });
     expect(focused).toEqual([false]);
     expect(browsed).toEqual(["agent:7"]);
+    // Shift+Tab goes back to /messages, instead of reaching Pi, where it
+    // changes the thinking level.
+    const back = setup({
+      rows: true,
+      agents: 2,
+      suppressed: false,
+      focused: true,
+    });
+    expect(back.press("\u001b[Z")).toEqual({ consume: true });
+    expect(back.messages).toEqual([{}]);
   });
 });

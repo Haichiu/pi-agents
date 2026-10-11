@@ -125,7 +125,8 @@ a name.
 - `send` prompts an idle agent and steers a working one; `followUp` queues
   after the current answer instead.
 - `wait` resolves once the named agents are idle and returns their results.
-  Cancelling a wait cancels only the wait.
+  Cancelling a wait cancels only the wait. Only `agent_wait` waits; spawns
+  and sends return at once.
 - `interrupt` aborts the current work; the agent stays open. Only the attach
   view's Esc interrupts.
 - `stop` interrupts, drops pending parent requests, and closes the agent or
@@ -252,6 +253,50 @@ delegating agent's conversation
 - The tool result is the graph's delivery; Pi's outbox isn't involved. Once
   the call ended, the service closes the graph and its helpers.
 
+### Messages between agents
+
+Every agent that isn't a helper can message the others; `docs/messaging.md`
+states the guarantees and what's left out. The extension
+`pi-agents-messaging` holds two tools:
+
+- `agent_status` lists the agents a sender can message, finished ones too,
+  with their state and the job each was started with, cut at 4,000
+  characters per agent and 30,000 in all.
+- `agent_send` submits a message to another agent's conversation and
+  returns without waiting. Like the parent's messages, it steers a working
+  recipient unless `followUp` queues it after the current work.
+
+Mechanics:
+
+- The first run of a send binds the recipient by conversation ID in a memo
+  of the call's task, with the text, the mode, and the send time; reruns
+  replay the memo and never resolve the name again.
+- Under the recipient's turn in `MessagingHub`, an in-process queue per
+  agent, the send logs the message in `pi-agents.messages` and refuses a
+  stopped recipient in the same commit, then submits it with the request ID
+  `message:<sender>:<tool task>` (`replay: "safe"`), which the recipient
+  admits once. Once logged, the submission ignores the call's cancellation.
+- A stop records `stopped` in the agent's turn, then interrupts. A send that
+  got its turn first is withdrawn or interrupted; one that comes after is
+  refused. The record keeps `stopped` until the parent or the user messages
+  the agent.
+- When the service starts, before the harness resumes, it submits logged
+  messages that a crash left without a submission, or marks them dropped
+  when the recipient is stopped or gone.
+- The recipient sees `[from <name>] <text>`; the prompt says these come from
+  agents, not the user. Its answer creates no delivery: the parent's
+  deliveries follow parent requests only. A steer joins the recipient's
+  current run, so the answer that settles a parent request can include it.
+- Helpers neither send nor receive. Agents started while the setting is on
+  select the extension; the registry always installs it, so turning the
+  setting off later doesn't break them, and new sends are refused.
+- The log keeps the latest 1,000 messages for the UI and counts the ones it
+  dropped. A message's status comes from its submission: queued, delivered
+  once placed, or dropped when an interrupt withdrew it from the inbox or the
+  service dropped it after a crash.
+- `agent_status` lists the agents `agent_send` accepts, with states from the
+  service through `MessagingHub`.
+
 ## Delivery
 
 Parent requests use an outbox: the record stores the request ID and message
@@ -360,10 +405,10 @@ loses a delivery but can repeat one.
 
 | Tool | Parameters |
 | --- | --- |
-| `agent_spawn` | `job`, `name?`, `profile?`, `model?`, `thinking?`, `tools?`, `skills?`, `cwd?`, `delegate?`, `wait?` (seconds) |
-| `agent_spawn_graph` | `name?`, `agents` (2 to 12 of `job`, `name?`, `after?`, `profile?`, `model?`, `thinking?`, `tools?`, `skills?`, `cwd?`, `delegate?`), `failFast?`, `wait?` (seconds) |
-| `agent_send` | `name`, `message`, `followUp?`, `wait?` (seconds) |
-| `agent_wait` | `names` (agents or graphs), `timeout?` |
+| `agent_spawn` | `job`, `name?`, `profile?`, `model?`, `thinking?`, `tools?`, `skills?`, `cwd?`, `delegate?` |
+| `agent_spawn_graph` | `name?`, `agents` (2 to 12 of `job`, `name?`, `after?`, `profile?`, `model?`, `thinking?`, `tools?`, `skills?`, `cwd?`, `delegate?`), `failFast?` |
+| `agent_send` | `name`, `message`, `followUp?` |
+| `agent_wait` | `names` (agents or graphs), `timeout?` (seconds) |
 | `agent_status` | `name?` (agent or graph) |
 | `agent_stop` | `name` (agent or graph) |
 
@@ -372,9 +417,11 @@ cannot be expressed in the tool schemas that providers accept. The tools,
 `delegate_graph` included, take `task` for `job` too, as calls of earlier
 builds and models used to them name it. Agents without
 a name are called `<graph>-<n>`, or after their profile. `agent_send` to a
-graph fails and lists its agents. Models sometimes pass `wait: false` or
-quoted numbers, so the tools drop seconds that aren't positive numbers and
-parse numeric strings.
+graph fails and lists its agents. Blocking lives in one place, `agent_wait`:
+the other tools return at once, which a script follows with `agent_wait` when
+it needs the results, and they drop a `wait` argument of earlier builds.
+Models sometimes pass `timeout: false` or quoted numbers, so the tools drop
+seconds that aren't positive numbers and parse numeric strings.
 
 Each tool declares an output schema and returns structured content, which
 codemode scripts receive instead of the text (`src/pi/output.ts`):
@@ -393,14 +440,16 @@ An agent is its `name`, `state`, `graph`, and what its latest turn produced:
 reports an earlier turn's answer. A graph is its `state`, `stopped`, and per
 agent its `after`, `end`, and `outcome`, with `result` or `error`; nodes
 carry the answer to the graph's job. Results keep the limit of the text the
-model reads and say when they were cut with `truncated`. Calls that wait
-return what they observed after the wait.
+model reads and say when they were cut with `truncated`. `agent_wait`
+returns what it observed after the wait; the other calls return what they
+started.
 
 A steer from the user ends every running wait at once; the agents keep
 working and their results arrive as messages. Follow-ups don't end waits.
 
-The system prompt adds one line of guidance, the usable profiles, and the
-user's scoped models, so the parent recognizes model names. The `model`
+The system prompt adds brief guidance, also that agents can message each
+other, the usable profiles, and the user's scoped models, so the parent
+recognizes model names. The `model`
 argument and profile models resolve like `pi --model` patterns among models
 with credentials. Profiles with an unavailable model or unresolvable skills
 stay out of the prompt, and the UI reports them once per session.
@@ -423,10 +472,15 @@ No clocks, activity, or delivery markers. The deliveries a wait took stay
 beside the receipt, in the same details, for delivery bookkeeping.
 
 `src/ui/tool-views.ts` draws calls and results and never sees live agents.
-A call draws its arguments only: its title, a dim `key=value` line, and its
-body. A result draws its receipt only: progress what the call started, the
-final result how agents were, with `⊠` for what a wait gave up on, then why
-it ended, such as `Timed out`. Renderers share no state, so a call draws the
+A call draws its arguments only: its title with dim `key=value` pairs after
+it, and its body. A result draws its receipt only: progress what the call started, the
+final result how agents were, then why its wait ended, such as `Timed out`.
+Of what hasn't finished, a call that started it (spawn, spawn graph, send,
+delegate, or such a call of an earlier build that waited) shows only what
+it started, without a state, and `agent_wait` marks it `⊠`. A result indents under its call. A call whose title names its
+graph shows the graph's agents right below its arguments, without a line
+of their own for the graph until it finished, and collapsed, a graph
+call's body is the tree, not its shape again. Renderers share no state, so a call draws the
 same live, finished, and replayed. A failed call shows its error text.
 Results stored by earlier versions decode to receipts when read, and
 details no version reads show the result's text.
@@ -434,16 +488,21 @@ details no version reads show the result's text.
 Pi's transcript and the attach view each have a map from tool name to
 renderers, since the parent's tools and the agents' tools differ: the
 parent's tools use them through their definitions, and the attach view
-draws `delegate_graph` with its own, and Pi's tools with Pi's.
+draws the agents' `delegate_graph`, `agent_status`, and `agent_send`, a
+message card, with its own, and Pi's tools with Pi's.
 
 ## Frontend
 
-- Panel above the editor: one line per open agent or graph, working first. A
-  graph's line shows how many of its agents finished, with its agents below
-  it as a tree in stages; unfocused, a finished graph folds to its line. ←
-  from an empty editor or Ctrl+Q focuses it, or opens `/agents` while it's
-  empty. Space folds a graph or an agent's helpers, ⏎ attaches, `s` stops,
-  Tab trades the panel for `/agents` at the same row. The panel and
+- Panel above the editor: unfocused, one summary line, counts per state
+  with the state glyphs, without names or messages. ← from an empty editor,
+  Ctrl+Q, or a click on the summary focuses it, or ← and Ctrl+Q open
+  `/agents` while it's empty. Focused, it shows one line per open agent or
+  graph, working first; a graph's line shows how many of its agents
+  finished, with its agents below it as a tree in stages. Space folds a
+  graph or an agent's helpers, ⏎ attaches, `s` stops, a click on a row
+  attaches too, in Pi's fullscreen mode, which reports the mouse to
+  components (`handleMouse`), and Tab opens `/agents` at the same row.
+  Typing returns to the editor with the key. The panel and
   `/agents` share what the user folded. Before intercepting input or taking
   focus, the controller checks `TUI.hasOverlay()` and yields to any visible
   overlay. This is intentionally conservative: `hasOverlay()` includes
@@ -458,15 +517,61 @@ draws `delegate_graph` with its own, and Pi's tools with Pi's.
   accent color and `result queued`.
 - Attach view: a port of Pi's `ExperimentalChatView`, rendering the agent's
   durable conversation view with Pi's message and tool components. ⏎ prompts
-  or steers, Alt+⏎ queues a follow-up, Esc interrupts, Ctrl+O expands tool
-  output, ← detaches.
-- `/agents`: a table of all agents and graphs, closed ones dimmed, with
-  details, attach, and stop. Each row shows how long it ran: until now while
+  or steers, Alt+⏎ queues a follow-up, Esc interrupts a working agent and
+  goes back from an idle one while the editor is empty, Ctrl+O expands
+  tool output, ← detaches.
+- `/agents`: a table of all agents and graphs, names in bold and the rest
+  dim, with details, attach, and stop. Each row shows how long it ran: until now while
   it works, else until it ended, from durable task end times that survive
   restarts. An agent's detail shows its job and its latest result; a
   graph's detail says its order in words and shows each agent's result.
+- Keys follow one model. Tab cycles the panel, `/agents`, and `/messages`,
+  Shift+Tab backwards, skipping a stop with nothing to show. Esc goes back
+  one level; in the attach view it interrupts a working agent, as in Pi, and
+  goes back from an idle one. ⏎ opens the selected thing, `s` stops, and `m`
+  opens `/messages`, filtered by the selected agent or at the selected
+  message.
+- Messages between agents. Each surface has one job: the
+  panel shows live state, so only queued messages; the transcript and
+  `/messages` show history, `/messages` with times; the attach view shows one agent's
+  conversation. `/agents` doesn't show messages: an agent's details are its
+  job and its result. `src/ui/messages.ts` is the one place that draws
+  messages: a line, `scout → notes` with the names in bold, then the text,
+  and a card, `✦` and the line on Pi's message background, the whole text
+  below when expanded. Every line fits its width, and a line ends in `…`
+  when more lines follow. Lists keep the text dim so names stand out: the
+  panel, which shows only queued messages, and `/messages`, where dropped
+  messages are red. Cards in the attach view are dim while queued, like
+  Pi's queued input, and normal once delivered; a dropped message leaves
+  the view, since the agent's queue no longer holds it.
+  - Panel, focused: queued messages of the agents it shows, with how long
+    they waited, in a column to their right from 120 terminal columns, else
+    below them. The agents get a fixed share, so the message column stays
+    put as messages come and go. Text starts right after the names, without
+    padding to a common column. When not all fit, a first row counts the
+    older ones and points to `m`. ↑↓ reach messages, ⏎ attaches to a
+    message's recipient.
+  - Transcript: one custom entry per message, a card without time or
+    status, which Pi's model doesn't see. Entries only append and are
+    deduplicated by message ID and send time; Ctrl+O shows a long message
+    in full.
+  - Attach view: received and sent messages as the same cards, never as
+    the user's input; Ctrl+O expands them with tool output. Queued input
+    shows dim below the conversation.
+  - `/messages` (`src/ui/stream.ts`): every message in one stream, newest
+    first, one line each, as time, then the message's line; the text starts
+    right after the names, so rows are ragged but the text gets the room.
+    Typing filters by text and names. ⏎ opens the selected message as
+    Markdown in a fixed pane below the list, which follows the selection,
+    and closes it; messages can be whole documents, so they don't unfold
+    in the list. ← attaches to the sender and → to the recipient, in the
+    order the line names them. `m` opens it at a message or filtered by an
+    agent's name.
 - pi-durable's task graph stays out of the UI. `AgentService.liveTasks()`
   exposes it for tests and debugging.
+- Key hints fit the width: `fitHints` (`src/ui/frame.ts`) drops those for
+  keys that work alike everywhere first, ⇧↑↓, ↑↓, Space, Tab, then `s`.
+- Only the focused panel ticks, since only it shows times.
 - The fancy-footer integration reports working and idle counts.
 
 ## Testing

@@ -6,8 +6,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AgentInfo, AgentState } from "../agents/types.js";
-import { AGENT_ICON, STATE_STYLES } from "./format.js";
+import type { AgentInfo } from "../agents/types.js";
+import { AGENT_ICON, STATE_STYLES, stateCounts } from "./format.js";
 
 const FANCY_FOOTER_AGENTS_WIDGET_ID = "pi-agents.agents";
 
@@ -15,24 +15,11 @@ const FANCY_FOOTER_PROTOCOL = 1;
 const FANCY_FOOTER_WIDGET_EVENT = "pi-fancy-footer:widget";
 const FANCY_FOOTER_READY_EVENT = "pi-fancy-footer:ready";
 
-const ORDER: AgentState[] = [
-  "working",
-  "waiting",
-  "idle",
-  "failed",
-  "interrupted",
-  "skipped",
-];
-
 /** Counts per state, empty without open agents. */
 export function formatFooterSummary(agents: readonly AgentInfo[]): string {
-  const counts = new Map<AgentState, number>();
-  for (const agent of agents)
-    counts.set(agent.state, (counts.get(agent.state) ?? 0) + 1);
-  return ORDER.flatMap((state) => {
-    const count = counts.get(state);
-    return count ? [`${count}${STATE_STYLES[state].icon}`] : [];
-  }).join(" ");
+  return stateCounts(agents)
+    .map(([state, count]) => `${count}${STATE_STYLES[state].icon}`)
+    .join(" ");
 }
 
 export class FancyFooterReporter {

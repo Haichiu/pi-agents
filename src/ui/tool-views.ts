@@ -18,6 +18,8 @@
 import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
+  Container,
+  Text,
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -37,11 +39,13 @@ import type { AgentInfo, GraphInfo } from "../agents/types.js";
 import {
   AGENT_ICON,
   type Colorize,
+  formatInputs,
   formatUsage,
   oneLine,
   STATE_STYLES,
   WAIT_ENDED_STYLE,
 } from "./format.js";
+import { messageCard } from "./messages.js";
 
 /** How a call renders: a title, the explicit arguments, and a body. */
 export interface CallView {
@@ -117,7 +121,7 @@ export class FitLines implements Component {
 }
 
 /**
- * A call: its title, then a dim line of the explicit arguments and the
+ * A call: its title with the explicit arguments dim after it, then the
  * body, indented. Expanded, the body shows in full.
  */
 export function formatCall(
@@ -127,9 +131,11 @@ export function formatCall(
   color: Colorize,
   bold: (text: string) => string = (text) => text,
 ): string {
-  const lines = [`${color("accent", AGENT_ICON)} ${bold(label)} ${view.title}`];
+  // The explicit arguments follow the title, dim, on the same line.
   const pairs = formatPairs(view.pairs);
-  if (pairs) lines.push(`  ${color("dim", pairs)}`);
+  const lines = [
+    `${color("accent", AGENT_ICON)} ${bold(label)} ${view.title}${pairs ? ` ${color("dim", pairs)}` : ""}`,
+  ];
   if (view.body) {
     if (expanded)
       lines.push(
@@ -137,10 +143,10 @@ export function formatCall(
           .split("\n")
           .map((line) => (line ? `  ${color("muted", line)}` : "")),
       );
-    else
-      lines.push(
-        `  ${color("muted", view.collapsed ?? view.body.replace(/\s+/g, " ").trim())}`,
-      );
+    else {
+      const collapsed = view.collapsed ?? view.body.replace(/\s+/g, " ").trim();
+      if (collapsed) lines.push(`  ${color("muted", collapsed)}`);
+    }
   }
   return lines.join("\n");
 }
@@ -199,7 +205,7 @@ function graphCall(args: GraphArgs, fallback: string): CallView {
         .map((agent, index) => {
           const pairs = formatPairs(agentPairs(agent));
           const after = agent.after?.length
-            ? ` ← ${agent.after.join(", ")}`
+            ? ` after ${agent.after.join(", ")}`
             : "";
           // The job keeps its own lines, indented under the agent; calls
           // of earlier builds named it `task`.
@@ -213,7 +219,8 @@ function graphCall(args: GraphArgs, fallback: string): CallView {
         })
         .join("\n\n"),
     ].join("\n"),
-    collapsed: shape,
+    // Collapsed, the result's tree shows the agents and who waits for whom.
+    collapsed: "",
   };
 }
 
@@ -225,12 +232,34 @@ interface ToolView {
   call: (args: Args) => CallView;
   /** What a result without agents or graphs says. */
   empty?: string;
+  /** The call starts the work it reports on, so what hasn't finished is
+   * only what it started: no state, which would go stale. */
+  starts?: true;
+}
+
+/** What a call that started work shows of what hasn't finished: only that
+ * it started, without a state. */
+function asStarted(receipt: ToolReceipt): ToolReceipt {
+  const started = <T extends { outcome?: NodeKind }>(item: T): T => {
+    if (isFinished(item.outcome)) return item;
+    const { outcome: _, ...rest } = item;
+    return rest as T;
+  };
+  return {
+    ...receipt,
+    graphs: receipt.graphs.map((graph) => ({
+      ...started(graph),
+      agents: graph.agents.map(started),
+    })),
+    agents: receipt.agents.map(started),
+  };
 }
 
 /** The parent's tools: their labels and call views. */
 const PARENT_CALLS: Record<string, ToolView> = {
   agent_spawn: {
     label: "spawn",
+    starts: true,
     call: (args) => ({
       title: str(args.name) || "agent",
       pairs: { ...agentPairs(args as AgentArgs), wait: seconds(args.wait) },
@@ -239,10 +268,12 @@ const PARENT_CALLS: Record<string, ToolView> = {
   },
   agent_spawn_graph: {
     label: "spawn graph",
+    starts: true,
     call: (args) => graphCall(args as GraphArgs, "graph"),
   },
   agent_send: {
     label: "send",
+    starts: true,
     call: (args) => ({
       title: str(args.name),
       pairs: { followUp: args.followUp, wait: seconds(args.wait) },
@@ -271,7 +302,13 @@ const PARENT_CALLS: Record<string, ToolView> = {
 const AGENT_CALLS: typeof PARENT_CALLS = {
   delegate_graph: {
     label: "delegate",
+    starts: true,
     call: (args) => graphCall(args as GraphArgs, "helpers"),
+  },
+  agent_status: {
+    label: "status",
+    call: () => ({ title: "agents" }),
+    empty: "No other agents",
   },
 };
 
@@ -314,29 +351,32 @@ function glyph(
   return `${color(style.color, style.icon)} `;
 }
 
+/** An agent's line: its name, then its details dim, separated by single
+ * spaces. `others` counts the other agents of its graph. */
 function agentRow(
   agent: AgentReceipt,
   receipt: ToolReceipt,
   color: Colorize,
+  expanded = false,
+  others = 0,
 ): string {
-  const dot = color("dim", " · ");
-  const inputs = agent.inputs?.length
-    ? color("dim", ` ← ${agent.inputs.join(", ")}`)
-    : "";
+  const after = formatInputs(agent.inputs ?? [], others);
   const usage = agent.usage ? formatUsage(agent.usage) : "";
   const error =
     agent.outcome === "failed" && agent.body
       ? color("error", oneLine(agent.body, 120))
       : undefined;
   return [
-    `${glyph(agent.outcome, receipt, color)}${agent.name}${inputs}`,
+    `${glyph(agent.outcome, receipt, color)}${agent.name}`,
+    after ? color("dim", after) : undefined,
     agent.profile ? color("dim", agent.profile) : undefined,
     agent.model ? color("dim", agent.model) : undefined,
     usage ? color("dim", usage) : undefined,
+    agent.job && !expanded ? color("dim", oneLine(agent.job, 120)) : undefined,
     error,
   ]
     .filter((part): part is string => part !== undefined)
-    .join(dot);
+    .join(" ");
 }
 
 /** `1 failed, 2 stopped`: how many of a graph's agents didn't answer. */
@@ -353,28 +393,35 @@ function graphNote(graph: GraphReceipt): string | undefined {
   return note || undefined;
 }
 
+/**
+ * A graph's line. Below a call whose title names the graph (`titled`), it
+ * leaves out the name, and a graph that only started has no line: its
+ * agents hang below the call's title.
+ */
 function graphRow(
   graph: GraphReceipt,
   receipt: ToolReceipt,
   color: Colorize,
-): string {
-  const dot = color("dim", " · ");
+  titled = false,
+): string | undefined {
   const total = graph.agents.length;
   if (graph.outcome === undefined)
-    return `${graph.name}${dot}${color("dim", `graph of ${total}`)}`;
+    return titled
+      ? undefined
+      : `${graph.name} ${color("dim", `graph of ${total}`)}`;
   const done = graph.agents.filter((agent) => isFinished(agent.outcome)).length;
   const usage = graph.usage ? formatUsage(graph.usage) : "";
   const note = isFinished(graph.outcome) ? graphNote(graph) : undefined;
   return [
-    `${glyph(graph.outcome, receipt, color)}${graph.name}`,
-    color("dim", `graph ${done}/${total}`),
+    `${glyph(graph.outcome, receipt, color)}${titled ? color("dim", `graph ${done}/${total}`) : graph.name}`,
+    titled ? undefined : color("dim", `graph ${done}/${total}`),
     usage ? color("dim", usage) : undefined,
     note
       ? color(graph.outcome === "failed" ? "error" : "dim", note)
       : undefined,
   ]
     .filter((part): part is string => part !== undefined)
-    .join(dot);
+    .join(" ");
 }
 
 /** A receipt's lines: graphs as trees, then agents, then how the wait
@@ -383,10 +430,26 @@ export function formatReceipt(
   receipt: ToolReceipt,
   expanded: boolean,
   color: Colorize,
+  /** The call's title names its graph, as a spawn's does. */
+  titled = false,
 ): string {
   const lines: string[] = [];
-  const agentLines = (agent: AgentReceipt, lead: string, indent: string) => {
-    lines.push(`${color("dim", lead)}${agentRow(agent, receipt, color)}`);
+  const agentLines = (
+    agent: AgentReceipt,
+    lead: string,
+    indent: string,
+    others = 0,
+  ) => {
+    lines.push(
+      `${color("dim", lead)}${agentRow(agent, receipt, color, expanded, others)}`,
+    );
+    // Expanded, a job shows in full below its agent.
+    if (expanded && agent.job)
+      lines.push(
+        ...agent.job
+          .split("\n")
+          .map((line) => `${color("dim", indent)}  ${color("muted", line)}`),
+      );
     if (
       expanded &&
       agent.body &&
@@ -400,10 +463,16 @@ export function formatReceipt(
       );
   };
   for (const graph of receipt.graphs) {
-    lines.push(graphRow(graph, receipt, color));
+    const row = graphRow(graph, receipt, color, titled);
+    if (row) lines.push(row);
     graph.agents.forEach((agent, index) => {
       const last = index === graph.agents.length - 1;
-      agentLines(agent, last ? "└─ " : "├─ ", last ? "   " : "│  ");
+      agentLines(
+        agent,
+        last ? "└─ " : "├─ ",
+        last ? "   " : "│  ",
+        graph.agents.length - 1,
+      );
     });
   }
   for (const agent of receipt.agents) agentLines(agent, "", "");
@@ -470,7 +539,12 @@ function resultText(result: {
 
 /** Renderers of one tool: the call from its arguments, the result from its
  * receipt, an error from its text. */
-function toolRenderers({ label, call, empty }: ToolView): ToolRenderers {
+function toolRenderers({
+  label,
+  call,
+  empty,
+  starts,
+}: ToolView): ToolRenderers {
   return {
     renderCall(args, theme: Theme, context) {
       const color: Colorize = (name, value) => theme.fg(name, value);
@@ -485,13 +559,14 @@ function toolRenderers({ label, call, empty }: ToolView): ToolRenderers {
         context.expanded,
       );
     },
+    // A result indents under its call, like the call's arguments.
     renderResult(result, options, theme: Theme, context) {
       const color: Colorize = (name, value) => theme.fg(name, value);
       // An error carries no receipt: the tool threw, or Pi never ran the
       // call because the model's message broke off. Show why.
       if (context.isError)
         return new FitLines(
-          theme.fg("error", resultText(result) || "Failed"),
+          indent(theme.fg("error", resultText(result) || "Failed")),
           options.expanded,
         );
       const decoded = decodeReceipt(result.details);
@@ -499,17 +574,32 @@ function toolRenderers({ label, call, empty }: ToolView): ToolRenderers {
       if (!decoded) {
         const text = resultText(result);
         return new FitLines(
-          color("dim", options.expanded ? text : (text.split("\n")[0] ?? "")),
+          indent(
+            color("dim", options.expanded ? text : (text.split("\n")[0] ?? "")),
+          ),
           options.expanded,
         );
       }
-      const lines = formatReceipt(decoded, options.expanded, color);
+      const lines = formatReceipt(
+        starts ? asStarted(decoded) : decoded,
+        options.expanded,
+        color,
+        starts,
+      );
       return new FitLines(
-        lines || (empty ? color("dim", empty) : ""),
+        indent(lines || (empty ? color("dim", empty) : "")),
         options.expanded,
       );
     },
   };
+}
+
+/** Lines indented by two columns, under a call's title. */
+function indent(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => (line ? `  ${line}` : line))
+    .join("\n");
 }
 
 function views(
@@ -526,5 +616,39 @@ function views(
 /** Renderers of the parent's tools in Pi's transcript. */
 export const PARENT_TOOL_VIEWS = views(PARENT_CALLS);
 
-/** Renderers of the agents' own tools in the attach view. */
-export const AGENT_TOOL_VIEWS = views(AGENT_CALLS);
+/**
+ * An agent's `agent_send` call as the message it sent, the same card as a
+ * received one, and a refusal below it. `sender` names the agent.
+ */
+function sendView(sender: () => string): ToolRenderers & { label: string } {
+  return {
+    label: "send",
+    renderShell: "self",
+    renderCall: (args, theme: Theme, context) =>
+      messageCard(
+        {
+          from: sender(),
+          to: str((args as Args | undefined)?.name) || "?",
+          text: str((args as Args | undefined)?.message),
+        },
+        context.expanded,
+        theme,
+      ),
+    renderResult: (result, _options, theme: Theme, context) =>
+      context.isError
+        ? new Text(
+            theme.fg("error", `  Not sent: ${resultText(result) || "refused"}`),
+            1,
+            0,
+          )
+        : new Container(),
+  };
+}
+
+/** Renderers of the agents' own tools in the attach view of the agent
+ * `self` names. */
+export function agentToolViews(
+  self: () => string,
+): Record<string, ToolRenderers & { label: string }> {
+  return { ...views(AGENT_CALLS), agent_send: sendView(self) };
+}
