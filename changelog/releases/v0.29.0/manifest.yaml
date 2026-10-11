@@ -1,0 +1,9 @@
+created: 2026-10-11
+title: Agents that message each other
+intro: >-
+  Agents can now message one another directly, while Pi makes their activity and handoffs
+  easier to follow across the panel, attach view, and message stream. Keyboard controls
+  also make it faster to move between agents and detach when needed.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.28.0
