@@ -61,11 +61,29 @@ its services, and then resumes the harness:
   graph tasks, and delegation; `installAgentExtensions` installs them in any
   registry, the way the session worker installs `CodingTools` and its
   prompt. The core never opens storage or a harness, never closes or
-  resumes one, and never assumes the root conversation.
+  resumes one, and never assumes the root conversation. `AgentService`
+  (`service.ts`) is a facade: it owns the lifecycle, the queries, the
+  operations, and the refresh after each change, and delegates to one
+  collaborator per concern (see below).
 - **Frontend** (`src/pi`, `src/ui`): tools, commands, and views. They see
   plain data through `AgentService`, like the session worker's presentations
   see `AgentController` and `Transcript`; only the attach view reads a
   conversation's view.
+
+The core's collaborators, each owning one concern and its state. Lower
+modules never import higher ones; where a lower one needs something from
+above, it takes a callback in its constructor options:
+
+| Module | Owns |
+| --- | --- |
+| `store.ts` | `AgentStore`: the commits and snapshots of pi-agents' documents, and submissions. No state in memory. |
+| `observer.ts` | `HarnessObserver`: the commit listener, per-conversation caches it feeds, and cached reads of task outcomes and entries that never change. |
+| `message-log.ts` | `MessageLog`: the messages between agents and the status of each. |
+| `projection.ts` | `Projection`: the records and the `AgentInfo` and `GraphInfo` derived from them, and the settled outcomes of undelivered parent requests. |
+| `delivery.ts` | `Delivery`: what is due to the parent, what is in flight, and acknowledgment. |
+| `waits.ts` | `Waits`: which agents and graphs waits cover, and the conditions that end waits. |
+| `creation.ts` | Validation of spawns and the commits that create agents and graphs. |
+| `context.ts` | The background context and durable ID helpers the collaborators share. |
 
 A durable Pi would host pi-agents in its session worker: install the
 extensions in the worker's registry and pass its harness and the session's
@@ -108,8 +126,9 @@ A graph's agent is also `waiting` while an input's node is live, and
 
 `closed` is a flag that hides an idle agent from the panel; storage keeps it.
 Users and models call this *stopping* an agent. An agent closes on its own
-once an answer to a parent request is delivered or consumed by a wait and no
-parent request remains. Failed and interrupted agents stay open. A parent
+once an answer is delivered or consumed by a wait and no parent request
+remains. A successful wait consumes an answer to a user prompt at once,
+without a parent delivery. Failed and interrupted agents stay open. A parent
 message to a closed agent opens it again. A closed agent that works again,
 for example because the user talks to it, shows in the panel until it is
 idle. Names are unique among visible agents and graphs; a name resolves to
