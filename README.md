@@ -9,6 +9,13 @@ Agents run inside your Pi process on
 checkpoints every step. When you resume a session, interrupted agents continue
 where they stopped.
 
+> [!CAUTION]
+> Agents can't use MCP servers or tools from other extensions, such as web
+> search. They work with Pi's built-in tools: `read`, `bash`, `edit`, `write`,
+> `grep`, `find`, and `ls`. MCP servers and extension tools live in Pi's
+> session, while agents run on pi-durable. This changes once Pi runs its own
+> session on pi-durable.
+
 <table>
   <tr>
     <td width="50%"><img src="demo/agents.gif" alt="Pi starts an audit graph on three models whose reviewers delegate one helper per file, shows the live tree and the merged findings, browses the results in /agents, and spawns three agents that tell jokes"></td>
