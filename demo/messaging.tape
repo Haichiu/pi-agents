@@ -23,7 +23,8 @@ Sleep 2.5s
 Type "Find and fix a concurrency bug in src/agents/graphs.ts. Have scout message fixer with the finding, and fixer message scout back."
 Sleep 0.8s
 Enter
-Sleep 4s
+# By default the panel is one line above the editor.
+Sleep 5s
 
 # Watch scout's steer queue while fixer is working.
 Ctrl+Q
@@ -31,6 +32,10 @@ Wait+Screen@60s /scout → fixer/
 Sleep 3s
 Wait+Screen@60s /The repair is in/
 Sleep 3s
+
+# Back to the editor, and the panel folds to one line again.
+Escape
+Sleep 1.5s
 
 # Read the exchange, filter by agent, and expand the finding.
 Type "/messages" Enter

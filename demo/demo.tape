@@ -30,14 +30,20 @@ Enter
 Sleep 2.5s
 
 # A graph two levels deep, on three models.
-Type "Audit src: a luna agent maps it, a fable and a luna agent review src/agents and src/ui with one helper per file, and a sol agent ranks the top findings."
+Type "Audit src: a luna agent maps it, an astra and a luna agent review src/agents and src/ui with one helper per file, and a sol agent ranks the top findings."
 Sleep 0.8s
 Enter
-Sleep 4s
+# By default the panel is one line above the editor.
+Sleep 5s
+
 # Focus the panel to see the whole tree.
 Ctrl+Q
 Wait+Screen@90s /The audit is in/
 Sleep 3.5s
+
+# Back to the editor, and the panel folds to one line again.
+Escape
+Sleep 1.5s
 
 # The results, agent by agent.
 Type "/agents"

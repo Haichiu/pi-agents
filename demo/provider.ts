@@ -1,6 +1,6 @@
 /**
  * A scripted model provider for the README demo. It registers the provider
- * `demo` with the models `sol`, `luna`, and `fable`, and answers Pi and its
+ * `demo` with the models `sol`, `luna`, and `astra`, and answers Pi and its
  * agents from a script, so the recording is free, offline, and the same
  * every time. Agents still run for real: they read the files of
  * demo/project, start helpers, and pass results along.
@@ -36,7 +36,7 @@ const AUDIT: ToolArguments = {
     },
     {
       name: "core",
-      model: "fable",
+      model: "astra",
       tools: ["read"],
       delegate: true,
       after: ["map"],
@@ -143,9 +143,9 @@ const call = (
   );
 
 const FINDING =
-  "src/agents/graphs.ts starts independent agents one at a time. Replace the awaited loop with Promise.all(agents.map(start)) so they start together. Message me when it is fixed.";
+  "🔎 Fixer, I found the culprit! src/agents/graphs.ts starts independent agents one at a time, like a queue at the bakery. Replace the awaited loop with Promise.all(agents.map(start)) so they start together. Message me when it is fixed.";
 const FIXED =
-  "Fixed src/agents/graphs.ts: runGraph now awaits Promise.all(agents.map(start)). Independent agents start together, and runGraph still waits for all of them.";
+  "🔧 Done, scout. src/agents/graphs.ts now awaits Promise.all(agents.map(start)): independent agents start together, and runGraph still waits for all of them. You owe me a coffee. ☕";
 
 /** One answer, chosen by the newest message of the conversation. */
 const respond: FauxResponseStep = async (context, options) => {
@@ -190,7 +190,7 @@ const respond: FauxResponseStep = async (context, options) => {
   }
   if (task.startsWith("Scout the graph runner")) {
     if (textOf(last).startsWith("[from fixer]"))
-      return say("Thanks, fixer. That addresses the sequential-start finding.");
+      return say("Coffee is on me, fixer. ☕ Case closed.");
     if (tool === "read")
       return call("Finding my teammate", "", [["agent_status", {}]]);
     if (tool === "agent_status")
@@ -198,7 +198,7 @@ const respond: FauxResponseStep = async (context, options) => {
         ["agent_send", { name: "fixer", message: FINDING }],
       ]);
     if (tool === "agent_send")
-      return say("Sent the concurrency finding directly to fixer.");
+      return say("Finding delivered to fixer. Now we wait. 🕵️");
     return call("Checking the graph runner", "", [
       ["read", { path: "src/agents/graphs.ts" }],
     ]);
@@ -209,7 +209,7 @@ const respond: FauxResponseStep = async (context, options) => {
         ["agent_send", { name: "scout", message: FIXED }],
       ]);
     if (tool === "agent_send")
-      return say("Fixed the sequential starts and messaged scout back.");
+      return say("Fixed, and scout knows. Time for that coffee.");
     if (
       messages.some(
         (message) =>
@@ -353,7 +353,7 @@ export default function demoProvider(pi: ExtensionAPI): void {
     models: [
       { id: "sol", name: "Sol", reasoning: true },
       { id: "luna", name: "Luna", reasoning: true },
-      { id: "fable", name: "Fable", reasoning: true },
+      { id: "astra", name: "Astra", reasoning: true },
     ],
     tokensPerSecond: TOKENS_PER_SECOND,
   });

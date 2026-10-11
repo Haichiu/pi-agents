@@ -9,7 +9,16 @@ Agents run inside your Pi process on
 checkpoints every step. When you resume a session, interrupted agents continue
 where they stopped.
 
-<img src="demo/agents.gif" width="840" alt="Pi starts an audit graph on three models whose reviewers delegate one helper per file, shows the live tree and the merged findings, browses the results in /agents, and spawns three agents that tell jokes">
+<table>
+  <tr>
+    <td width="50%"><img src="demo/agents.gif" alt="Pi starts an audit graph on three models whose reviewers delegate one helper per file, shows the live tree and the merged findings, browses the results in /agents, and spawns three agents that tell jokes"></td>
+    <td width="50%"><img src="demo/messaging.gif" alt="Scout messages fixer about a concurrency bug, fixer patches it and replies, and Pi browses their exchange in /messages and attaches to both agents"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Delegate work to agents and graphs</sub></td>
+    <td align="center"><sub>Agents message each other</sub></td>
+  </tr>
+</table>
 
 ## 🚀 Installation
 
