@@ -1,0 +1,9 @@
+created: 2026-10-11
+title: More reliable agent lifecycle management
+intro: >-
+  Pi-agents now closes resumed agents after Pi accepts their answers and can prune
+  old session storage with an opt-in retention setting. These updates make agent lifecycle
+  management more reliable while keeping cleanup under your control.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.29.0
