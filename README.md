@@ -76,9 +76,9 @@ Pi session, with its own store, kept apart from Pi's session file:
 ```text
 ╭─ Pi process ─────────────────────────────────────────────────────╮
 │                                                                  │
-│  ╭──────────────────╮                    ╭────────────────────╮  │
-│ ╭┤  ◆ Pi session    │                    │  ▤ panel           │  │
-│ ┊╰───┬──────────▲───╯                    │  ⇄ attach view     │  │
+│  ╭─────────────────────────────────────╮ ╭────────────────────╮  │
+│ ╭┤  ◆ Pi session: MCP, extension tools │ │  ▤ panel           │  │
+│ ┊╰───┬──────────▲──────────────────────╯ │  ⇄ attach view     │  │
 │ ┊    │ agent_*  │ results                │  ≡ /agents         │  │
 │ ┊    ▼          │                        │  ✉ /messages       │  │
 │ ┊╭──────────────┴───╮                    ╰─────────▲──────────╯  │
@@ -92,10 +92,10 @@ Pi session, with its own store, kept apart from Pi's session file:
 │ ┊│                                                            │  │
 │ ┊│   ◉ scout ─── message ──▶ ● notes                          │  │
 │ ┊│                                                            │  │
-│ ┊│   ╭─ graph ─────────────────────────╮                      │  │
-│ ┊│   │ ● map ─┬─▶ ◉ core ─┬─▶ ○ report │                      │  │
-│ ┊│   │        └─▶ ◉ ui ───┘            │                      │  │
-│ ┊│   │            └─ ◉ ◉ ◉ helpers     │                      │  │
+│ ┊│   ╭─ graph ─────────────────────────╮  agent tools:        │  │
+│ ┊│   │ ● map ─┬─▶ ◉ core ─┬─▶ ○ report │  read  bash  edit    │  │
+│ ┊│   │        └─▶ ◉ ui ───┘            │  write  grep         │  │
+│ ┊│   │            └─ ◉ ◉ ◉ helpers     │  find  ls            │  │
 │ ┊│   ╰─────────────────────────────────╯                      │  │
 │ ┊│                                                            │  │
 │ ┊│   agents are conversations; turns, tool calls, and graphs  │  │
