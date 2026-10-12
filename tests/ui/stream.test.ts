@@ -7,7 +7,16 @@ import { messageStream, streamRow } from "../../src/ui/stream.js";
 const alpha = { id: "1", name: "alpha" };
 const beta = { id: "2", name: "beta" };
 const gamma = { id: "3", name: "gamma" };
-const at = new Date(2026, 9, 11, 12, 48, 30).getTime();
+// Today, since rows show only the time of today's messages.
+const today = new Date();
+const at = new Date(
+  today.getFullYear(),
+  today.getMonth(),
+  today.getDate(),
+  12,
+  48,
+  30,
+).getTime();
 
 function message(
   id: string,
