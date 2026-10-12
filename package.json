@@ -14,8 +14,8 @@
     "subagents",
     "pi-durable"
   ],
-  "author": "Tenzir",
-  "license": "Apache-2.0",
+  "author": "Matthias Vallentin",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mavam/pi-agents.git"
