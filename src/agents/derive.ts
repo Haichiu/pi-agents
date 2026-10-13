@@ -177,24 +177,64 @@ export function resultOf(
   };
 }
 
-/** What a submission settled with; undefined while it is still open. */
+export const USER_KIND = "pi.user";
+
+/**
+ * What a submission settled with, or `interrupted` when its turn was
+ * aborted: the request then stays open for a later answer, after `since`,
+ * its input entry, or its admission when it was never placed. Undefined
+ * while the submission is still open.
+ */
+export type SubmissionOutcome =
+  | RequestOutcome
+  | { kind: "interrupted"; since: number };
+
 export function outcomeOf(
   submission: SubmissionRecord | undefined,
   answer: EntryRecord | undefined,
   agentId: string,
   name: string,
-): RequestOutcome | undefined {
+): SubmissionOutcome | undefined {
   if (submission?.type !== "input") return undefined;
+  const interrupted: SubmissionOutcome = {
+    kind: "interrupted",
+    since: Number(submission.entry ?? submission.id),
+  };
   if (submission.status === "done") {
     const result = resultOf(answer, agentId, name);
     if (!result) return { kind: "failed", reason: "answer missing" };
-    if (result.stopReason === "aborted") return { kind: "aborted" };
+    if (result.stopReason === "aborted") return interrupted;
     return { kind: "answered", result };
   }
   if (submission.status === "unanswered") {
     return submission.reason === "aborted"
-      ? { kind: "aborted" }
+      ? interrupted
       : { kind: "failed", reason: submission.reason };
+  }
+  return undefined;
+}
+
+/**
+ * The answer that settles an interrupted request: the first finished answer
+ * after an input from `since` on, so a turn that started before the request
+ * entered the conversation never answers it. `entries` ascend from `since`.
+ * Interrupting is a correction, not a cancellation; only stopping the agent
+ * withdraws the request.
+ */
+export function resumedAnswer(
+  entries: Iterable<EntryRecord>,
+  since: number,
+  agentId: string,
+  name: string,
+): AgentResult | undefined {
+  let input = false;
+  for (const entry of entries) {
+    if (entry.kind === USER_KIND && entry.id >= since) input = true;
+    else if (input) {
+      const result = resultOf(entry, agentId, name);
+      if (result?.stopReason === "stop" || result?.stopReason === "length")
+        return result;
+    }
   }
   return undefined;
 }

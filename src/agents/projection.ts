@@ -58,6 +58,9 @@ export class Projection {
   private graphRecords: Record<string, GraphRecord> = {};
   private readonly agentInfos = new Map<string, AgentInfo>();
   private readonly graphInfoById = new Map<string, GraphInfo>();
+  /** Answers that settled interrupted requests, by agent and request ID;
+   * entries never change, so neither does a found answer. */
+  private readonly resumed = new Map<string, AgentResult>();
   /** Settled outcomes of undelivered parent requests, per agent. */
   private readonly settled = new Map<string, Map<string, RequestOutcome>>();
   private readonly harness: Harness;
@@ -116,6 +119,7 @@ export class Projection {
 
   deleteSettled(agentId: string, rid: string): void {
     this.settled.get(agentId)?.delete(rid);
+    this.resumed.delete(`${agentId}:${rid}`);
   }
 
   async reload(): Promise<void> {
@@ -174,7 +178,26 @@ export class Projection {
     return [...all];
   }
 
-  /** Recompute one agent's info; returns aborted request IDs to drop. */
+  /** A parent request's outcome. An interrupted request stays open until a
+   * later answer settles it. */
+  private async outcome(
+    id: string,
+    name: string,
+    rid: string,
+  ): Promise<RequestOutcome | undefined> {
+    const key = `${id}:${rid}`;
+    const known = this.resumed.get(key);
+    if (known) return { kind: "answered", result: known };
+    const settled = await this.store.requestOutcome(id, name, rid);
+    if (settled?.kind !== "interrupted") return settled;
+    const result = await this.store.resumedAnswer(id, name, settled.since);
+    if (!result) return undefined;
+    this.resumed.set(key, result);
+    return { kind: "answered", result };
+  }
+
+  /** Recompute one agent's info; returns request IDs whose answer was
+   * already delivered, to drop. */
   private async compute(id: string, record: AgentRecord): Promise<string[]> {
     const cid = conversationId(id);
     const [live, usage, agent] = await Promise.all([
@@ -182,28 +205,27 @@ export class Projection {
       this.harness.snapshot(UsageDoc, cid, CONTEXT),
       this.harness.snapshot(AgentDoc, cid, CONTEXT),
     ]);
+    const result: AgentResult | undefined = resultOf(
+      this.observer.lastAssistantOf(id),
+      id,
+      record.name,
+    );
     const outcomes = new Map<string, RequestOutcome>();
-    const aborted: string[] = [];
+    const delivered: string[] = [];
     for (const rid of Object.keys(record.requests)) {
-      const outcome = await this.store.requestOutcome(id, record.name, rid);
+      const outcome = await this.outcome(id, record.name, rid);
       if (!outcome) continue;
-      if (outcome.kind === "aborted") aborted.push(rid);
-      else if (
+      if (
         outcome.kind === "answered" &&
         record.delivered.includes(outcome.result.entryId)
       )
-        aborted.push(rid);
+        delivered.push(rid);
       else outcomes.set(rid, outcome);
     }
     if (outcomes.size > 0) this.settled.set(id, outcomes);
     else this.settled.delete(id);
 
     const jobAnswer = await this.jobAnswer(id, record);
-    const result: AgentResult | undefined = resultOf(
-      this.observer.lastAssistantOf(id),
-      id,
-      record.name,
-    );
     const state =
       (live?.run === undefined
         ? await this.nodeState(id, record, result)
@@ -274,7 +296,7 @@ export class Projection {
         ? { queued: true }
         : {}),
     });
-    return aborted;
+    return delivered;
   }
 
   /**

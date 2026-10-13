@@ -8,10 +8,13 @@ import {
 import type { AgentService } from "../../src/agents/service.js";
 import { WaitInterrupted } from "../../src/agents/types.js";
 import {
+  briefly,
   closeService,
   createFaux,
   createGatedFaux,
+  heldUntilAborted,
   jsonlStorage,
+  lastUserText,
   MODEL,
   openService,
   parentOf,
@@ -168,7 +171,7 @@ describe("AgentService", () => {
     expect(service.list()).toEqual([]);
   });
 
-  test("wait closes an interrupted agent resumed by a user prompt", async () => {
+  test("a resumed agent answers the parent's interrupted request", async () => {
     const { models } = createGatedFaux();
     const service = await open({ models });
     const agent = await service.spawn({
@@ -189,20 +192,54 @@ describe("AgentService", () => {
     expect(service.get("w")?.closed).toBe(false);
     expect(service.pendingDeliveries()).toEqual([]);
     await service.prompt("w", "continue", "auto");
-    await until(() => service.get("w")?.state === "idle");
-    expect(service.get("w")?.closed).toBe(false);
-    expect(service.pendingDeliveries()).toEqual([]);
+    await until(() => service.pendingDeliveries().length === 1);
+    expect(service.get("w")?.queued).toBe(true);
 
     const outcome = await service.waitFor([{ kind: "agent", id: agent.id }], {
       carrier: { call: "c2" },
     });
     expect(outcome.agents[0]?.result?.text).toBe("done: [user] continue");
-    // The interrupted parent request is gone, and the user turn has no
-    // delivery. The wait still consumed its answer and must close it.
-    expect(outcome.deliveries).toEqual([]);
-    expect(service.get("w")?.closed).toBe(true);
+    expect(outcome.deliveries).toHaveLength(1);
+    parentOf(service).hold(outcome.deliveries);
+    await until(() => service.get("w")?.closed === true);
     expect(service.pendingDeliveries()).toEqual([]);
     expect(service.list()).toEqual([]);
+  });
+
+  test("an earlier answer never settles an interrupted request", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses(
+      Array.from({ length: 20 }, () => async (context, options) => {
+        const prompt = lastUserText(context);
+        if (prompt.includes("slow")) await briefly(options?.signal);
+        if (prompt.includes("block")) await heldUntilAborted(options?.signal);
+        return fauxAssistantMessage(`done: ${prompt}`);
+      }),
+    );
+    const service = await open({ models });
+    await service.spawn({ job: "slow", name: "w", cwd: ".", model: MODEL });
+    await until(() => service.get("w")?.state === "working");
+    // Queued while the job runs: admitted before the job's answer.
+    await service.send("w", "block", "followUp");
+    await until(() => service.get("w")?.result?.text === "done: slow");
+    await until(() => service.get("w")?.state === "working");
+    await service.interrupt("w");
+    await until(() => service.get("w")?.state === "interrupted");
+    await until(() => service.pendingDeliveries().length === 1);
+    const [job] = service.pendingDeliveries();
+    expect(job?.requestIds).toEqual(["parent:1"]);
+    if (job) await service.acknowledge(job);
+    expect(service.get("w")?.closed).toBe(false);
+
+    await service.prompt("w", "continue", "auto");
+    await until(() => service.pendingDeliveries().length === 1);
+    const [resumed] = service.pendingDeliveries();
+    expect(resumed?.requestIds).toEqual(["parent:2"]);
+    expect(
+      resumed?.outcome.kind === "answered" && resumed.outcome.result.text,
+    ).toBe("done: [user] continue");
   });
 
   test("interrupt aborts work without delivering", async () => {
