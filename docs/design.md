@@ -56,6 +56,13 @@ pi-agents has three layers:
   depend on higher ones.
 - **Frontend:** Pi's tools, commands, and views. They see plain data
   through the service; only the attach view reads a conversation directly.
+  The frontend also publishes the agents' lifecycle state on Pi's event
+  bus, so other extensions can follow children without parsing views.
+  Snapshots carry only names and states, never conversations, and each
+  replaces the last, so a listener that joins late needs only one. They
+  start once the session is restored and end with an explicit reset at
+  shutdown, which says nothing about whether stored work finished. See the
+  [extension event protocol](./architecture.md#extension-lifecycle-events).
 
 Everything the core needs from the parent goes through one interface:
 whether the parent takes results now, handing results over, which results
