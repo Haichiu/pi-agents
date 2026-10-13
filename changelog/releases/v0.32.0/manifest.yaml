@@ -1,0 +1,9 @@
+created: 2026-10-13
+title: Cap working agents
+intro: >-
+  This release caps how many agents work at once instead of how many model requests
+  they send, so local model servers keep each agent's prompt cache. Other extensions
+  can now also follow child agents through lifecycle events.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.31.1
