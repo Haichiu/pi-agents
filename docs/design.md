@@ -262,8 +262,15 @@ but can repeat one.
   directory; untrusted projects contribute none. Models can't name skills
   only the user may invoke.
 - Models, logins, and settings come from the parent session.
-- A session-wide cap on concurrent model requests queues agents' requests,
-  never refuses them, and leaves the parent's requests alone.
+- A session-wide cap on working agents queues agents, never refuses them,
+  and leaves the parent alone. It holds per agent, not per request: an
+  agent keeps its slot from its first request until its work ends, so a
+  server that serves one conversation at a time keeps its cache instead of
+  switching between agents at every tool call. Its compactions keep the
+  slot until they end. An agent waiting for its helpers gives its slot up
+  and doesn't take it back until they finish, or a cap of one would
+  deadlock. Slots are taken before requests and before compactions
+  summarize, so a summary that a restart resumes runs without one.
 - Storage of old sessions is deleted after a configurable retention, in the
   background and never for sessions a live process holds.
 
