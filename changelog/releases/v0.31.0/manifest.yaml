@@ -1,0 +1,9 @@
+created: 2026-10-13
+title: Agents gain images and codemode
+intro: >-
+  Pi agents can now inspect images, run codemode scripts, and inherit the tools active
+  in your Pi session. This release also improves recovery from storage errors and
+  requires Pi 1.2.0 or newer.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.30.0
