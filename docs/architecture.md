@@ -30,7 +30,7 @@ Pi session, with its own store, kept apart from Pi's session file:
 │ ┊│   ╭─ graph ─────────────────────────╮  agent tools:        │  │
 │ ┊│   │ ● map ─┬─▶ ◉ core ─┬─▶ ○ report │  read  bash  edit    │  │
 │ ┊│   │        └─▶ ◉ ui ───┘            │  write  grep         │  │
-│ ┊│   │            └─ ◉ ◉ ◉ helpers     │  find  ls            │  │
+│ ┊│   │            └─ ◉ ◉ ◉ helpers     │  find  ls  codemode  │  │
 │ ┊│   ╰─────────────────────────────────╯                      │  │
 │ ┊│                                                            │  │
 │ ┊│   agents are conversations; turns, tool calls, and graphs  │  │
@@ -76,6 +76,12 @@ agent gets its job twice. A message from one agent to another reaches its
 recipient once, also when Pi crashes while sending it. A tool call that
 can't safely repeat reports the interruption to the agent instead.
 
+If writing to agent storage fails, for example because the disk is full,
+agents pause and Pi tells you. The storage then reopens, and agents continue
+as after a restart. If it fails again within a minute, agents stay paused
+until you next use them. Sessions started with `--no-session` keep agents
+in memory, so a storage failure loses them, and Pi says so.
+
 Agents of sessions started with `--no-session` live in memory and end with
 the session.
 
@@ -85,4 +91,5 @@ Agents' storage lives in `~/.pi/agent/pi-agents/sessions/<session-id>/`,
 with one directory per Pi session, apart from Pi's session file.
 Sessions started with `--no-session` keep agents in memory.
 
-Developers can read [the design document](./design.md) for the mechanics.
+Developers can read [the design document](./design.md) for the design and
+its reasons.

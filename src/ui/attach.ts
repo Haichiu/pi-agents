@@ -2,11 +2,8 @@
  * The attach view: an agent's durable conversation rendered with Pi's own
  * message and tool components, plus an editor that talks to the agent.
  *
- * `ChatView` ports Pi's `ExperimentalChatView` (coding-agent
- * `src/experimental/client-tui-chat.ts`), which renders a pi-durable
- * `ConversationView`. It keeps that structure so an upstream export can
- * replace it. This module is the one frontend place that reads pi-durable
- * view types.
+ * `ChatView` renders a pi-durable `ConversationView`. This module is the
+ * one frontend place that reads pi-durable view types.
  *
  * Tool calls draw with Pi's renderers for Pi's tools and with
  * `agentToolViews` for the agents' own tools, such as `delegate_graph` and
@@ -118,6 +115,28 @@ function userText(content: UserMessage["content"]): string {
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("");
+}
+
+const DIAGNOSTICS = /^<harness>\n([\s\S]*)\n<\/harness>$/;
+
+/**
+ * A tool result as Pi shows its own: pi-durable appends the call's
+ * diagnostics for the model as a `<harness>` block, such as "Command exited
+ * with code 3" after a failed bash command, which the card shows as plain
+ * lines instead.
+ */
+export function displayedResult(result: ToolResultMessage): ToolResultMessage {
+  let changed = false;
+  const content = result.content.map((block) => {
+    const match = block.type === "text" ? DIAGNOSTICS.exec(block.text) : null;
+    if (!match) return block;
+    changed = true;
+    const lines = (match[1] ?? "")
+      .split("\n")
+      .map((line) => line.replace(/^\[(error|warning|info)\] /, ""));
+    return { type: "text" as const, text: `\n${lines.join("\n")}` };
+  });
+  return changed ? { ...result, content } : result;
 }
 
 /** The text as the user typed it, without the marker the agent sees. */
@@ -332,7 +351,9 @@ class ChatView {
       message?.role === "toolResult"
     ) {
       const result = message as ToolResultMessage;
-      this.tool(result.toolName, result.toolCallId).updateResult(result);
+      this.tool(result.toolName, result.toolCallId).updateResult(
+        displayedResult(result),
+      );
     } else if (entry.kind === "pi.compaction") {
       this.addText(this.theme.fg("muted", "[compaction]"));
       if (message?.role === "user") this.addText(userText(message.content));

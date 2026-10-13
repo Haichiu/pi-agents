@@ -16,20 +16,20 @@ manually.
 
 ## Development
 
-- Use Bun as the runtime and package manager.
 - Keep the docs in sync with user-facing changes: the manual under `docs/`
   (`usage.md`, `graphs.md`, `messaging.md`, `profiles.md`,
-  `configuration.md`, `architecture.md`) and `docs/design.md` for the
-  mechanics. `README.md` keeps only installation, demos, example prompts,
+  `configuration.md`, `architecture.md`) and `docs/design.md` for design
+  decisions and their reasons, without implementation details such as file
+  paths, module names, or version history. `README.md` keeps only installation, demos, example prompts,
   and the architecture diagram.
 - Only `src/host`, `src/agents`, and the attach view (`src/ui/attach.ts`) may
   import pi-durable; everything else goes through `AgentService`.
 
 ## Tests
 
-- Test documented guarantees and user-visible behavior, about one test each.
+- Keep tests minimal; avoid overly specific regression tests.
+- Don't test what Pi or pi-durable already guarantee.
 - Don't commit storage fixtures or fakes of Pi or pi-durable internals.
-- Delete tests together with the behavior they cover.
 
 ## Release engineering
 

@@ -40,7 +40,8 @@ export interface AgentHarness {
   harness: Harness;
   /** The conversation that owns the parent's graphs. */
   anchor: Conversation;
-  /** Close the harness and its environments, after the service closed. */
+  /** Close the harness, its environments, and the extensions' scripts,
+   * after the service closed. */
   close(): Promise<void>;
 }
 
@@ -75,13 +76,21 @@ export async function openAgentHarness(
       harness: opened,
       anchor,
       close: async () => {
-        await opened.close(CONTEXT);
-        await envs.cleanup(CONTEXT);
+        try {
+          await opened.close(CONTEXT);
+        } finally {
+          try {
+            await envs.cleanup(CONTEXT);
+          } finally {
+            await options.extensions.close();
+          }
+        }
       },
     };
   } catch (error) {
     await harness?.close(CONTEXT);
     await envs.cleanup(CONTEXT);
+    await options.extensions.close();
     throw error;
   }
 }
