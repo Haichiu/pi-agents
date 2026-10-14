@@ -1,0 +1,9 @@
+created: 2026-10-14
+title: Survive early session replacement
+intro: >-
+  This release fixes a crash that ended Pi when a session was replaced right after
+  it started, as RPC clients do when they send a new session request shortly after
+  spawning Pi.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.32.0
