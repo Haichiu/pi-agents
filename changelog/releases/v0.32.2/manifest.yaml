@@ -1,0 +1,9 @@
+created: 2026-10-15
+title: Keep parent prompts from unexpectedly opening child agents
+intro: >-
+  Typing or pasting into the parent editor now returns keyboard control from the agent
+  panel. Pressing Enter submits the prompt instead of unexpectedly opening a child
+  agent.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.32.1
