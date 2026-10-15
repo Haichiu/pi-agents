@@ -301,6 +301,11 @@ Each surface has one job: the panel shows live state, the transcript and
 the message list show history, and the attach view shows one agent's
 conversation. One module draws messages for all of them.
 
+The focused panel keeps only its own keys. Any other key, including typed,
+pasted, or encoded text, returns focus to the editor where it lands, so Enter
+after editing submits to the parent rather than opening an agent. Terminal
+reports aren't keys and leave focus alone.
+
 ## Deferred
 
 Composition beyond graphs (result schemas, loops, conditions, races), edges
