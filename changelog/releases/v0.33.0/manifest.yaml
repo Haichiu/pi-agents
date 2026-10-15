@@ -1,0 +1,10 @@
+created: 2026-10-15
+title: Status glyphs for every agent state
+intro: >-
+  This release gives every agent status its own colored circle glyph, including closed
+  agents, and counts them in the footer next to the model. Switching sessions now
+  tells you and Pi which agents it paused, and failed agent results show their error
+  details.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.32.2
