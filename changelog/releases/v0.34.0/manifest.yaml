@@ -1,0 +1,8 @@
+created: 2026-10-16
+title: Classifier and image models in agent scripts
+intro: >-
+  Codemode scripts of agents can now run classifiers and generate images through models,
+  as in Pi. This release requires Pi 1.3.0 or newer.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.33.0
