@@ -1,0 +1,8 @@
+created: 2026-10-19
+title: Mouse wheel support in the attached view
+intro: "Scroll an attached agent conversation with the mouse wheel, and see its boundary\
+  \ with Pi\u2019s view at a glance. Keyboard scrolling remains available, and the\
+  \ new separator preserves the editor\u2019s agent name and status."
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.34.1
