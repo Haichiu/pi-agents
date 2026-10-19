@@ -148,7 +148,8 @@ In the focused panel:
 | Esc or → | Go back to the editor. Other keys go back too and act there, so typed or pasted text lands in the editor. |
 
 Attaching shows the agent's conversation with Pi's own message and tool
-rendering. The editor then talks to the agent:
+rendering, set off from Pi's view by a line on top. The editor's top border
+names the agent and shows its status. The editor then talks to the agent:
 
 | Key | Action |
 | --- | --- |
@@ -158,6 +159,7 @@ rendering. The editor then talks to the agent:
 | Ctrl+O | Expand or collapse tool output. |
 | ← or Ctrl+D | Detach when the editor is empty. |
 | Shift+↑ ↓, Shift+PgUp/PgDn | Scroll. |
+| Mouse wheel | Scroll in fullscreen mode, with the pointer over the attached view. |
 
 Messages you send while attached stay between you and the agent. Their
 results don't post into the parent conversation, with one exception: when

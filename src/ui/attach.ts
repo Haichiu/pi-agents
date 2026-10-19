@@ -16,7 +16,8 @@
  * Keys: ⏎ prompts an idle agent and steers a working one, Alt+⏎ queues a
  * follow-up, Esc interrupts a working agent and detaches from an idle one,
  * ← or Ctrl+D on an empty editor detach, Ctrl+O expands tool output, and
- * Shift+↑↓ and Shift+PgUp/PgDn scroll.
+ * Shift+↑↓ and Shift+PgUp/PgDn scroll. In fullscreen mode, the mouse wheel
+ * over the pane scrolls too; regular mode leaves the wheel to the terminal.
  */
 
 import type { AttachedReplicatedState } from "@earendil-works/chord";
@@ -58,6 +59,8 @@ import {
   Spacer,
   Text,
   type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -487,6 +490,16 @@ function fitQueuedLines(
   return shown;
 }
 
+/** The lines scrolled back after a wheel event over the pane; Pi reports
+ * scrolling up as a negative delta. */
+export function wheelScrollBack(
+  scrollBack: number,
+  maxScroll: number,
+  wheelDelta: number,
+): number {
+  return Math.max(0, Math.min(maxScroll, scrollBack - wheelDelta));
+}
+
 interface AgentPaneOptions {
   service: AgentService;
   agentId: string;
@@ -692,10 +705,17 @@ class AgentPane implements Component {
         ? [color("error", `⊗ ${info.result.errorMessage}`)]
         : [];
     const flash = this.flash ? [color("error", `⚠ ${this.flash.text}`)] : [];
+    // An unlabelled rule like the editor's bottom border sets the pane off
+    // from Pi above; the editor's badge stays the only label.
+    const separator = this.theme.fg("borderMuted", "─".repeat(width));
     const rows = this.tui.terminal?.rows ?? 24;
     const budget = Math.max(4, rows - 6);
     const fixed =
-      editorLines.length + statusLines.length + failure.length + flash.length;
+      1 +
+      editorLines.length +
+      statusLines.length +
+      failure.length +
+      flash.length;
     const content = Math.max(1, budget - fixed);
     const queued = fitQueuedLines(
       queuedLines(
@@ -712,6 +732,7 @@ class AgentPane implements Component {
       Math.max(1, content - queued.length),
     );
     return [
+      separator,
       ...transcript.map((line) => fitLine(line, width)),
       ...statusLines.map((line) => fitLine(line, width)),
       ...failure.map((line) => fitLine(line, width)),
@@ -738,6 +759,18 @@ class AgentPane implements Component {
       this.editor.handleInput(data);
     }
     this.tui.requestRender();
+  }
+
+  /** Pi routes mouse events only in fullscreen mode. Wheel events over the
+   * pane scroll its transcript instead of Pi's; everything else passes on. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+    this.scrollBack = wheelScrollBack(
+      this.scrollBack,
+      this.maxScroll,
+      event.wheelDelta,
+    );
+    return { handled: true };
   }
 
   invalidate(): void {
