@@ -19,6 +19,7 @@ import { agentToolViews } from "../../src/ui/tool-views.js";
 import {
   briefly,
   closeService,
+  gate,
   heldUntilAborted,
   hostOf,
   jsonlStorage,
@@ -40,9 +41,10 @@ afterEach(async () => {
  * `send <json>` calls agent_send, `spawn <json>` agent_spawn, a
  * message answers `got: <text>`, a tool
  * result `tool: <text>`, prompts and messages with `hold` wait until
- * aborted, and prompts with `briefly` work briefly.
+ * aborted, prompts with `briefly` work briefly, and prompts with `linger`
+ * wait until aborted, then until `lingering` is released.
  */
-function scripted() {
+function scripted(lingering?: { aborted: () => void; promise: Promise<void> }) {
   const faux = fauxProvider();
   const models = createModels();
   models.setProvider(faux.provider);
@@ -73,6 +75,11 @@ function scripted() {
         { stopReason: "toolUse" },
       );
     if (text.includes("hold")) await heldUntilAborted(options?.signal);
+    if (text.includes("linger")) {
+      await heldUntilAborted(options?.signal);
+      lingering?.aborted();
+      await lingering?.promise;
+    }
     if (text.includes("briefly")) await briefly(options?.signal, 300);
     const message = parseMessageInput(text);
     if (message) return fauxAssistantMessage(`got: ${message.text}`);
@@ -83,10 +90,14 @@ function scripted() {
 }
 
 async function open(
-  options: { storage?: Storage; messaging?: MessagingOptions } = {},
+  options: {
+    storage?: Storage;
+    messaging?: MessagingOptions;
+    models?: ReturnType<typeof scripted>;
+  } = {},
 ): Promise<AgentService> {
   const service = await openService({
-    models: scripted(),
+    models: options.models ?? scripted(),
     messaging: options.messaging ?? {},
     ...(options.storage ? { storage: options.storage } : {}),
   });
@@ -281,6 +292,7 @@ describe("messaging", () => {
     const service = await open();
     await service.spawnGraph({ agents: [spec("b", "sleep")] });
     await until(() => service.get("b")?.state === "working");
+    // As calls from before `mode` existed asked for it.
     const later = JSON.stringify({
       name: "b",
       message: "hello",
@@ -352,6 +364,119 @@ describe("messaging", () => {
           : [],
       );
     expect(answers).toContain("b: got: hello");
+  });
+
+  test("an interrupt aborts the recipient's work, whose job the message then answers", async () => {
+    const service = await open();
+    await service.spawnGraph({ agents: [spec("b", "hold")] });
+    await until(() => service.get("b")?.state === "working");
+    const now = JSON.stringify({
+      name: "b",
+      message: "hello",
+      mode: "interrupt",
+    });
+    await service.spawnGraph({ agents: [spec("a", `send ${now}`)] });
+    await until(() => service.get("b")?.result?.text === "got: hello");
+    expect(service.get("a")?.result?.text).toBe(
+      "tool: Interrupted b and sent the message.",
+    );
+    const answers = service
+      .pendingDeliveries()
+      .flatMap((delivery) =>
+        delivery.kind === "graph" &&
+        delivery.nodes[0]?.outcome.kind === "answered"
+          ? [`${delivery.name}: ${delivery.nodes[0].outcome.result.text}`]
+          : [],
+      );
+    expect(answers).toContain("b: got: hello");
+  });
+
+  test("a crash after an interrupt's log never aborts the work its message started", async () => {
+    const directory = tempDir();
+    let held = false;
+    const before = await open({
+      storage: await jsonlStorage(directory),
+      messaging: {
+        afterLog: async (context) => {
+          held = true;
+          await awaitWithContext(new Promise(() => {}), context);
+        },
+      },
+    });
+    await before.spawnGraph({ agents: [spec("b", "hold")] });
+    await until(() => before.get("b")?.state === "working");
+    const now = JSON.stringify({
+      name: "b",
+      message: "briefly hello",
+      mode: "interrupt",
+    });
+    await before.spawnGraph({ agents: [spec("a", `send ${now}`)] });
+    await until(() => held);
+    await until(() => before.get("b")?.state === "interrupted");
+
+    // Recovery submits the logged message; the rerun only finishes the send.
+    const after = await reopen(before, directory, {});
+    await until(() => after.get("a")?.state === "idle");
+    await until(() => after.get("b")?.result?.text === "got: briefly hello");
+    expect(after.get("b")?.state).toBe("idle");
+    expect(count(await transcript(after, "b"), "[from a] briefly hello")).toBe(
+      1,
+    );
+  });
+
+  test("agents that interrupt each other don't wait on each other", async () => {
+    const service = await open();
+    const interrupt = (name: string) =>
+      `send ${JSON.stringify({ name, message: "hi", mode: "interrupt" })}`;
+    await service.spawnGraph({
+      agents: [spec("a", interrupt("b")), spec("b", interrupt("a"))],
+    });
+    await until(
+      () =>
+        service.get("a")?.state !== "working" &&
+        service.get("b")?.state !== "working",
+    );
+  });
+
+  test("a sender cancelled during its interrupt still holds the recipient's results", async () => {
+    const aborted = gate();
+    const lingering = gate();
+    const service = await open({
+      models: scripted({
+        aborted: aborted.release,
+        promise: lingering.promise,
+      }),
+    });
+    const child = JSON.stringify({ agents: [{ name: "c", job: "hold" }] });
+    await service.spawnGraph({
+      agents: [{ ...spec("b", `spawn ${child}`), spawn: true }],
+    });
+    await until(() => service.get("b.c")?.state === "working");
+    await until(() => service.get("b")?.state === "idle");
+    await service.send("b", "linger", "steer");
+    await until(() => service.get("b")?.state === "working");
+    const now = JSON.stringify({
+      name: "b",
+      message: "fix",
+      mode: "interrupt",
+    });
+    await service.spawnGraph({ agents: [spec("a", `send ${now}`)] });
+    // a's interrupt is underway: b's work aborted, but its cleanup lingers.
+    await aborted.promise;
+    await service.interrupt("a");
+    lingering.release();
+    await until(() => service.get("b")?.state === "interrupted");
+    // b's group finishes; its results wait for b's next answer.
+    await service.interrupt("b.c");
+    await service.prompt("b.c", "go on", "auto");
+    await until(
+      () => service.get("b.c")?.result?.text === "done: [user] go on",
+    );
+    await Bun.sleep(100);
+    const kinds = (await entries(service, "b")).map((entry) => entry.kind);
+    expect(kinds).not.toContain("pi-agents.results");
+    expect(await transcript(service, "b")).not.toContain("[from a]");
+    expect(service.get("b")?.state).toBe("interrupted");
   });
 
   test("interrupting a busy recipient drops its queued messages", async () => {
@@ -429,9 +554,9 @@ describe("messaging", () => {
     );
     expect(service.messages()).toEqual([]);
     // The parent reopens it, and agents can message it again.
-    await service.send("b", "back", "auto");
+    await service.send("b", "back", "steer");
     await until(() => service.get("b")?.state === "idle");
-    await service.send("a", SEND, "auto");
+    await service.send("a", SEND, "steer");
     await until(() => service.messages().length === 1);
   });
 });
