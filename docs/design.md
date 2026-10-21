@@ -21,6 +21,30 @@ This document explains the design and why it is so. The
 - The host owns the harness, so the same core could later run inside a
   durable Pi session with a different host.
 
+## Scope
+
+pi-agents brings durability to Pi. Its core is durable agent execution and
+durable messaging: between agents, and from agents back to the parent.
+Graphs, delegation, and waits compose these primitives, and the views let
+users watch them. Everything else is a customization point, not a feature.
+
+- **Policy lives outside.** Pricing windows, budgets, quotas, approvals,
+  routing, scheduling, and notifications belong to the extensions and users
+  that want them. pi-agents offers hooks, events, profiles, and settings at
+  its durable boundaries, and the policy sits behind them.
+- **Hooks carry data and wait; they don't decide.** pi-agents keeps no
+  state, timers, reasons, commands, or views for another extension's
+  policy. A hook's contract is its context and when it runs.
+- **The smallest hook wins.** A need that extensions can't meet yet gets
+  the narrowest hook at an existing durable boundary, preferably one that
+  pi-durable already provides, not a mechanism that solves the need inside
+  pi-agents.
+- **Built-in policy isn't precedent.** Settings such as the working-agent
+  cap don't justify adding more policy beside them.
+
+A request that fits none of this is out of scope, even when it is easy to
+build. Saying no keeps the core small enough to stay durable.
+
 ## Concepts
 
 pi-agents calls the instructions an agent starts with its *job*. *Task*
@@ -101,11 +125,11 @@ delegate.
 
 Agents run in pi-durable, outside Pi's extension runner, so Pi's own provider
 events never see their requests. Extension hooks are the bridge: co-loaded Pi
-extensions capture immutable, namespaced JSON state when agents are created
-and transform their outgoing model requests. The host connects these hooks to
-the agent runtime; the core stores opaque state without interpreting another
-extension's settings. The bridge stays thin on purpose: it carries state and
-payloads, nothing else, so the plumbing behind it can follow pi-durable as
+extensions capture immutable, namespaced JSON state when agents are created,
+hold their model calls, and transform their outgoing model requests. The host
+connects these hooks to the agent runtime; the core stores opaque state
+without interpreting another extension's settings. The bridge stays thin on
+purpose: it carries state and payloads and awaits callbacks, nothing else, so the plumbing behind it can follow pi-durable as
 pi-durable gains native extension points, without changing the protocol.
 
 Creation captures a snapshot, rather than a live link to the parent. Changes
@@ -114,6 +138,18 @@ before it commits: a graph's nodes share one snapshot, and helpers copy their
 creator's state without recapturing it. State is committed with creation and
 survives retries, compaction, stop/reopen, and session recovery. It lives in
 the agents' shared records, so it stays small.
+
+A third hook lets extensions hold an agent's model calls, for example during
+peak pricing. It is a callback that pi-agents awaits, not a decision it
+interprets: the extension decides when to hold, why, for how long, and how
+users override it, and keeps whatever state that takes. The wait runs in
+pi-durable's own hooks before a request or compaction summary, where the
+working-agent cap waits too. Credentials therefore resolve after a long hold,
+and stopping, interrupting, and shutting down cancel the wait like any other
+durable wait. A failing callback is reported and doesn't stop the call, as
+with pi-durable's own hooks; an extension that must fail closed keeps
+waiting instead. Pi-agents adds no hold protocol, timers, or status, so a
+policy never becomes part of the core.
 
 Request hooks use the actual dispatched model, so routing and a child's
 choice of provider do not accidentally apply the parent's model policy.
@@ -355,6 +391,6 @@ doesn't let the panel intercept another view's navigation.
 ## Deferred
 
 Composition beyond graphs (result schemas, loops, conditions, races), edges
-to agents outside a graph, asynchronous delegation, budgets, MCP, extension
-tools, forking agents, a daemon or CLI, agents shared across sessions, and
-model changes for running agents.
+to agents outside a graph, asynchronous delegation, MCP, extension tools,
+forking agents, a daemon or CLI, agents shared across sessions, and model
+changes for running agents.

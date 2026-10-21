@@ -18,8 +18,8 @@ kept apart from Pi's session file:
 │ ┊│   tools          │ │   pi-service-tier  │ │ ≡ /agents      │  │
 │ ┊│                  │ │                    │ │ ✉ /messages    │  │
 │ ┊╰───┬─────────▲────╯ ╰─────────┬──────────╯ ╰────────▲───────╯  │
-│ ┊    │ agent_* │ results        ╎ hooks:              │          │
-│ ┊    │         │                ╎ capture at spawn,   │          │
+│ ┊    │ agent_* │ results        ╎ hooks: capture at   │          │
+│ ┊    │         │                ╎ spawn, hold calls,  │          │
 │ ┊    ▼         │                ▼ adapt requests      │          │
 │ ┊╭─────────────┴──────────────────────────────────────┴───────╮  │
 │ ┊│  ✦ pi-agents: a thin bridge from Pi to pi-durable          │  │
@@ -111,10 +111,11 @@ Pi session's `agent_start` and `agent_settled` lifecycle.
 
 ### Creation and request hooks
 
-Extensions can also initialize persistent, namespaced state at agent creation
-and transform child model requests with `onAgentCreate` and `onAgentRequest`.
-These callbacks are separate from the notification events described here.
-They carry JSON state and provider payloads only; they don't give agents
+Extensions can also initialize persistent, namespaced state at agent creation,
+hold child model calls, and transform child model requests with
+`onAgentCreate`, `beforeAgentRequest`, and `onAgentRequest`. These callbacks
+are separate from the notification events described here. They carry JSON
+state and provider payloads and can make a call wait; they don't give agents
 tools. See [Agent extension hooks](./hooks.md) for the optional protocol,
 inheritance, and error handling.
 

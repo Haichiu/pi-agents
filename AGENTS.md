@@ -3,6 +3,19 @@
 `pi-agents` is a pi extension for durable, named agents built on pi-durable.
 See `docs/design.md` for the design and core abstractions.
 
+## Scope
+
+The core is durable agent execution and durable messaging; everything else
+is a customization point (see `docs/design.md#scope`). Before building a
+requested feature:
+
+1. Durable execution or messaging needs it: build it here.
+2. Existing hooks, events, profiles, or settings suffice: show how an
+   extension does it.
+3. Otherwise, propose the smallest hook at a durable boundary. The policy
+   stays in the extension.
+4. Anything bigger: discuss the trade-off with the user first.
+
 ## Setup
 
 Install Lefthook once per clone:
