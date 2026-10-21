@@ -1,0 +1,9 @@
+created: 2026-10-21
+title: Recursive agent spawning
+intro: >-
+  Pi agents can now spawn coordinated groups recursively through a single tool, with
+  durable lifecycle and messaging behavior. This release also removes obsolete graph-spawning
+  interfaces and improves how agent tool calls and replies appear.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.35.0
