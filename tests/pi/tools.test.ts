@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { renderToolOutputType } from "@earendil-works/pi-codemode";
-import type {
-  AgentToolUpdateCallback,
-  ExtensionAPI,
-  ExtensionContext,
-  ToolDefinition,
+import {
+  type AgentToolUpdateCallback,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  type ExtensionAPI,
+  type ExtensionContext,
+  SessionManager,
+  SettingsManager,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import type { AgentService } from "../../src/agents/service.js";
@@ -15,6 +20,7 @@ import {
   type GraphInfo,
 } from "../../src/agents/types.js";
 import { SkillCatalog } from "../../src/catalog/skills.js";
+import agentExtension from "../../src/index.js";
 import { agentOutput, graphOutput } from "../../src/pi/output.js";
 import type { SessionHost } from "../../src/pi/session.js";
 import { registerAgentTools } from "../../src/pi/tools.js";
@@ -25,6 +31,7 @@ import {
   MODEL,
   openService,
   parentOf,
+  tempDir,
 } from "../agents/helpers.js";
 
 const noSkills = new SkillCatalog(async () => []);
@@ -65,14 +72,16 @@ const ctx = {
 
 /**
  * Pi stores a call's result right after the call returns, details
- * included, and the result names the deliveries a wait took.
+ * included, and the result names the deliveries a wait took. Resolves once
+ * they count as delivered.
  */
-function storeResult(details: unknown): void {
+async function storeResult(details: unknown): Promise<void> {
   const ids = (details as { deliveries?: string[] } | undefined)?.deliveries;
-  if (ids === undefined) return;
-  setTimeout(() => {
-    if (service) parentOf(service).hold(ids);
-  }, 0);
+  if (ids === undefined || !service) return;
+  const current = service;
+  parentOf(current).hold(ids);
+  while (current.pendingDeliveries().some((each) => ids.includes(each.id)))
+    await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
 /** Agent tools over a service whose model holds prompts with `hold`. */
@@ -83,8 +92,8 @@ async function gated() {
   const registered = tools();
   let calls = 0;
   /**
-   * Run a tool and return its text and what a script gets, which must match
-   * the tool's output schema.
+   * Run a direct tool call and return its text and structured output,
+   * which must match the tool's output schema.
    */
   return async (
     name: string,
@@ -96,16 +105,21 @@ async function gated() {
   ): Promise<{ text: string; details: unknown; output: unknown }> => {
     const tool = registered.get(name);
     if (!tool) throw new Error(`No tool ${name}`);
+    // Pi prepares arguments before it runs a tool.
     const result = await tool.execute(
       `call-${++calls}`,
-      params,
+      tool.prepareArguments?.(params) ?? params,
       options.signal,
       options.onUpdate,
       ctx,
     );
-    const output = result.structuredContent;
-    expect([...Value.Errors(tool.outputSchema, output)], name).toEqual([]);
-    storeResult(result.details);
+    expect(
+      [...Value.Errors(tool.outputSchema, result.structuredContent)],
+      name,
+    ).toEqual([]);
+    // IDs differ from run to run; the tests compare the rest.
+    const output = withoutIds(result.structuredContent);
+    await storeResult(result.details);
     const [first] = result.content;
     return {
       text: first?.type === "text" ? first.text : "",
@@ -155,8 +169,93 @@ function firstUpdate(): {
   return { onUpdate: () => resolve(), started };
 }
 
-describe("script output", () => {
-  test("every agent tool declares the output scripts get", () => {
+/** A script's output without the `id` fields. */
+function withoutIds(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutIds);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "id")
+      .map(([key, each]) => [key, withoutIds(each)]),
+  );
+}
+
+/** A script's view of a group of one agent. */
+function single(name: string, state: string, agent: Record<string, unknown>) {
+  return {
+    kind: "graph",
+    name,
+    state,
+    stopped: false,
+    agents: [{ name, after: [], end: true, ...agent }],
+  };
+}
+
+describe("tool exposure", () => {
+  test("Pi exposes waits only to the model and keeps other tools composable", async () => {
+    const cwd = tempDir();
+    const runtime = await createAgentSessionRuntime(
+      async ({ cwd, sessionManager, sessionStartEvent }) => {
+        const services = await createAgentSessionServices({
+          cwd,
+          agentDir: tempDir(),
+          settingsManager: SettingsManager.inMemory(),
+          resourceLoaderOptions: {
+            noExtensions: true,
+            noSkills: true,
+            noPromptTemplates: true,
+            noThemes: true,
+            noContextFiles: true,
+            extensionFactories: [agentExtension],
+          },
+        });
+        return {
+          ...(await createAgentSessionFromServices({
+            services,
+            sessionManager,
+            sessionStartEvent,
+            noTools: "builtin",
+          })),
+          services,
+          diagnostics: services.diagnostics,
+        };
+      },
+      { cwd, sessionManager: SessionManager.inMemory(cwd) },
+    );
+    try {
+      const errors: unknown[] = [];
+      await runtime.session.bindExtensions({
+        mode: "json",
+        onError: (error) => errors.push(error),
+      });
+      expect(errors).toEqual([]);
+      expect(runtime.session.getActiveToolNames()).toContain("agent_wait");
+      const callable = runtime.session.getCallableToolNames();
+      expect(callable).not.toContain("agent_wait");
+      for (const name of [
+        "agent_spawn",
+        "agent_send",
+        "agent_status",
+        "agent_stop",
+      ])
+        expect(callable).toContain(name);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  test("agent_spawn shows how to list a single agent's fields", () => {
+    const prepare = tools().get("agent_spawn")?.prepareArguments;
+    const lead = { name: "lead", job: "review", spawn: true };
+    expect(() => prepare?.(lead)).toThrow(
+      'Move job, spawn into an entry of agents. Arguments are always an agents array, also for a single agent: {"agents": [{"name": "lead"',
+    );
+    expect(prepare?.({ agents: [lead] })).toEqual({ agents: [lead] });
+  });
+});
+
+describe("structured output", () => {
+  test("every agent tool declares its structured output", () => {
     const registered = tools();
     for (const tool of registered.values())
       expect(tool.outputSchema, tool.name).toBeDefined();
@@ -169,13 +268,20 @@ describe("script output", () => {
   test("agents resolve to what their latest turn produced", async () => {
     const run = await gated();
     const a = { kind: "agent", name: "a", state: "idle" };
-    // Spawns and sends return at once; a script waits with agent_wait.
+    // Spawns and sends return at once; the model waits with agent_wait. A
+    // spawn starts a group, of one agent here, until its result arrived.
     expect(
-      (await run("agent_spawn", { job: "one", name: "a" })).output,
-    ).toMatchObject({ kind: "agent", name: "a" });
+      (await run("agent_spawn", { agents: [{ job: "one", name: "a" }] }))
+        .output,
+    ).toEqual(single("a", "working", { outcome: "working" }));
     expect((await run("agent_wait", { names: ["a"] })).output).toEqual({
-      agents: [{ ...a, result: "done: one" }],
-      graphs: [],
+      agents: [],
+      graphs: [
+        {
+          ...single("a", "idle", { outcome: "answered", result: "done: one" }),
+          outcome: "succeeded",
+        },
+      ],
       pending: [],
     });
     await run("agent_send", { name: "a", message: "two" });
@@ -194,7 +300,7 @@ describe("script output", () => {
 
   test("an interrupted turn doesn't report an earlier answer", async () => {
     const run = await gated();
-    await run("agent_spawn", { job: "one", name: "a" });
+    await run("agent_spawn", { agents: [{ job: "one", name: "a" }] });
     await run("agent_wait", { names: ["a"] });
     expect(
       (await run("agent_send", { name: "a", message: "hold two" })).output,
@@ -216,7 +322,7 @@ describe("script output", () => {
 
   test("a failed turn reports its error, not an earlier answer", async () => {
     const run = await gated();
-    await run("agent_spawn", { job: "one", name: "a" });
+    await run("agent_spawn", { agents: [{ job: "one", name: "a" }] });
     await run("agent_wait", { names: ["a"] });
     await run("agent_send", { name: "a", message: "fail two" });
     const failed = await run("agent_wait", { names: ["a"] });
@@ -233,8 +339,14 @@ describe("script output", () => {
   test("waits that end early return the state and what is pending", async () => {
     const run = await gated();
     const w = { kind: "agent", name: "w", state: "working" };
-    const pending = { agents: [w], graphs: [], pending: ["w"] };
-    await run("agent_spawn", { job: "hold", name: "w" });
+    const pending = {
+      agents: [],
+      graphs: [single("w", "working", { outcome: "working" })],
+      pending: ["w"],
+    };
+    // A wait that something interrupted reports what it was asked for.
+    const interrupted = { agents: [w], graphs: [], pending: ["w"] };
+    await run("agent_spawn", { agents: [{ job: "hold", name: "w" }] });
     // A timeout.
     expect(
       (await run("agent_wait", { names: ["w"], timeout: 0.05 })).output,
@@ -249,11 +361,7 @@ describe("script output", () => {
     );
     await aborted.started;
     abort.abort();
-    expect((await waiting).output).toEqual({
-      agents: [w],
-      graphs: [],
-      pending: ["w"],
-    });
+    expect((await waiting).output).toEqual(interrupted);
     // A steer from the user, also after steering the agent itself.
     await run("agent_send", { name: "w", message: "and more" });
     const steered = firstUpdate();
@@ -264,7 +372,7 @@ describe("script output", () => {
     );
     await steered.started;
     parentOf(service as AgentService).attend();
-    expect((await waitingAgain).output).toEqual(pending);
+    expect((await waitingAgain).output).toEqual(interrupted);
     expect(
       (await run("agent_send", { name: "w", message: "more" })).output,
     ).toEqual(w);
@@ -272,7 +380,7 @@ describe("script output", () => {
 
   test("graphs report failed, skipped, and stopped agents", async () => {
     const run = await gated();
-    await run("agent_spawn_graph", {
+    await run("agent_spawn", {
       name: "g",
       agents: [
         { job: "fail one", name: "a" },
@@ -290,6 +398,7 @@ describe("script output", () => {
       name: "g",
       state: "failed",
       stopped: false,
+      outcome: "failed",
       agents: [
         {
           name: "a",
@@ -303,7 +412,7 @@ describe("script output", () => {
     });
     expect(
       (
-        await run("agent_spawn_graph", {
+        await run("agent_spawn", {
           name: "h",
           agents: [
             { job: "hold", name: "c" },
@@ -334,6 +443,7 @@ describe("script output", () => {
           name: "h",
           state: "interrupted",
           stopped: true,
+          outcome: "stopped",
           agents: [
             { name: "c", after: [], end: false, outcome: "stopped" },
             { name: "d", after: ["c"], end: true, outcome: "stopped" },
@@ -426,7 +536,7 @@ describe("output", () => {
 describe("call results", () => {
   test("an expanded graph call keeps each task's lines", () => {
     const call = tools()
-      .get("agent_spawn_graph")
+      .get("agent_spawn")
       ?.renderCall?.(
         {
           name: "g",
@@ -439,7 +549,7 @@ describe("call results", () => {
         { expanded: true, state: {} },
       );
     expect(call?.render(80)).toEqual([
-      "spawn graph g",
+      "spawn g",
       "  a → b",
       "  a: Steps:",
       "    1. read  the code",
@@ -488,7 +598,7 @@ describe("call results", () => {
 
   test("results draw what the call saw, the same live and replayed", async () => {
     const run = await gated();
-    const spawn = tools().get("agent_spawn_graph");
+    const spawn = tools().get("agent_spawn");
     const args = {
       name: "audit",
       agents: [
@@ -497,9 +607,9 @@ describe("call results", () => {
       ],
     };
     // A spawn shows what it started, which stays true as the agents work.
-    const started = { details: (await run("agent_spawn_graph", args)).details };
+    const started = { details: (await run("agent_spawn", args)).details };
     const tree = [
-      "spawn graph audit",
+      "spawn audit",
       "  ├─ map faux-1",
       "  └─ report after map faux-1",
     ];
@@ -528,6 +638,27 @@ describe("call results", () => {
     await run("agent_wait", { names: ["audit"] });
     expect(drawFrame(spawn, args, structuredClone(started))).toEqual(tree);
     expect(drawWait(structuredClone(timedOut))).toEqual(gaveUp);
+  });
+
+  test("a spawn of one agent reads as that agent", async () => {
+    const run = await gated();
+    const spawn = tools().get("agent_spawn");
+    const args = { agents: [{ name: "scout", job: "Look.", spawn: true }] };
+    const started = await run("agent_spawn", args);
+    expect(started.text).toBe("Started scout.");
+    // The call names the agent, which its result doesn't repeat.
+    expect(drawFrame(spawn, args, started)).toEqual([
+      "spawn scout spawn=true",
+      "  Look.",
+    ]);
+    // Its result reads as its answer, without a graph.
+    const waited = await run("agent_wait", { names: ["scout"] });
+    expect(waited.text).toBe("scout answered:\n\ndone: Look.");
+    expect(
+      drawFrame(tools().get("agent_wait"), { names: ["scout"] }, waited).map(
+        (line) => line.replace(/ \d+(\.\d+)?k$/, " <tokens>"),
+      ),
+    ).toEqual(["wait scout", "  ● scout faux-1 <tokens>"]);
   });
 
   test("collapsed lines end in an ellipsis; expanded ones wrap", () => {

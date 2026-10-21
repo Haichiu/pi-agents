@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { migrateAgents } from "../../src/agents/records.js";
 import { discoverSkills } from "../../src/catalog/skills.js";
 import {
   graphContent,
@@ -222,26 +221,5 @@ describe("tool arguments", () => {
       names: ["a"],
     });
     expect(prepareArguments({ timeout: "120" })).toEqual({ timeout: 120 });
-  });
-
-  test("calls that name a job task still work", () => {
-    expect(prepareArguments({ task: "a", name: "x" })).toEqual({
-      job: "a",
-      name: "x",
-    });
-    // Graph and helper agents too, and a job wins over a task.
-    expect(
-      prepareArguments({ agents: [{ task: "a" }, { job: "b", task: "c" }] }),
-    ).toEqual({ agents: [{ job: "a" }, { job: "b" }] });
-  });
-
-  test("stored agents of earlier versions name their job task", () => {
-    expect(
-      migrateAgents({
-        agents: { "7": { name: "a", task: "review it", closed: false } },
-      }),
-    ).toEqual({
-      agents: { "7": { job: "review it", name: "a", closed: false } },
-    } as unknown as ReturnType<typeof migrateAgents>);
   });
 });

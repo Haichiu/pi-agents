@@ -3,16 +3,6 @@
  * conversation ID and graph task ID. Parent requests form an outbox: a
  * request is recorded before it is submitted with the same request ID, and
  * stays until its result is delivered or consumed by a wait.
- *
- * Sessions stored by earlier builds may also hold the documents
- * `pi-agents.stops` and `pi-agents.receipts`; nothing reads them.
- *
- * Migration: a change to a document's shape bumps its `version` and adds a
- * step to its `migrate(value, fromVersion)`; pi-durable migrates a stored
- * document on its next access. Optional fields that records of earlier
- * versions lack need no migration. `pi-agents.agents` is at version 2,
- * which renamed each agent's `task` to `job`; `pi-agents.graphs` is at
- * version 1.
  */
 
 import { defineDoc } from "@earendil-works/pi-durable";
@@ -40,13 +30,20 @@ export type AgentRecord = {
   requests: Record<string, ParentRequest>;
   /** Answer entries already delivered, newest last, bounded. */
   delivered: number[];
-  /** The graph this agent belongs to, by graph ID; absent when standalone. */
-  graph?: string;
-  /** Whether the agent can start helpers; absent means it can't. */
-  delegate?: boolean;
-  /** Stopped by the user or the parent, until one of them messages it
-   * again; other agents can't message it meanwhile. */
+  /** The graph this agent belongs to, by graph ID. */
+  graph: string;
+  /** Whether the agent may spawn agents of its own. */
+  spawn?: boolean;
+  /** How many agents started this one and its ancestors: 1 for the parent's agents. */
+  depth: number;
+  /** Stopped by the user or the parent, or with an agent above it, until
+   * the user or the parent messages it again; other agents can't message
+   * it meanwhile. */
   stopped?: boolean;
+  /** Its newest entry when the user last interrupted it: results it is
+   * owed wait until it answered after it, so they don't restart the work
+   * the user stopped. */
+  interrupted?: number;
 };
 
 export type AgentsState = {
@@ -58,24 +55,7 @@ export const AgentsDoc = defineDoc<AgentsState>({
   version: 2,
   scope: "session",
   initial: () => ({ agents: {} }),
-  migrate: (value) => migrateAgents(value),
 });
-
-/** Version 1 called an agent's job its `task`. */
-export function migrateAgents(value: Record<string, unknown>): AgentsState {
-  const agents = (value.agents ?? {}) as Record<
-    string,
-    Record<string, unknown>
-  >;
-  return {
-    agents: Object.fromEntries(
-      Object.entries(agents).map(([id, record]) => {
-        const { task, ...rest } = record;
-        return [id, { job: rest.job ?? task ?? "", ...rest } as AgentRecord];
-      }),
-    ),
-  };
-}
 
 export type GraphNodeRecord = {
   /** The agent's conversation ID. */
@@ -96,12 +76,52 @@ export type GraphRecord = {
   closed: boolean;
   /** The parent still expects the graph's result. */
   pending: boolean;
-  /** Stopped before it finished; absent in records written before. */
+  /** Stopped before it finished. Its result still reaches an agent that
+   * owns it, but not the parent. */
   stopped?: boolean;
-  /** A delegating agent's helpers: the agent, and the tool call that owns
-   * the graph task. Absent for graphs the parent started. */
-  owner?: { agent: string; tool: number };
+  /** Withdrawn with the work that needed it, such as when its owner was
+   * stopped or failed: it stops, and its result reaches nobody. */
+  cancelled?: true;
+  /** One agent the parent started on its own: the panel and the parent's
+   * messages show the agent alone, and only its ID addresses the group. */
+  single?: true;
+  /**
+   * The agent that spawned the group, and the tool call that did, by task
+   * ID, so a rerun of the call finds the group. Absent for graphs the
+   * parent started.
+   */
+  owner?: GroupOwner;
+  /** The owner's entry that presented the result: an input carrying it, or
+   * the result of an `agent_wait` call that returned it. */
+  presented?: number;
+  /** The `agent_wait` call that holds the result while it returns it, by
+   * task ID; delivery as input waits until that call ended. */
+  claim?: number;
+  /** Delivery attempts as input; the next one runs after the owner
+   * answered beyond `withdrawn`, its newest entry when an interrupt
+   * withdrew the last attempt. */
+  attempt?: number;
+  withdrawn?: number;
 };
+
+export type GroupOwner = {
+  agent: string;
+  tool: number;
+  /** The agent's newest entry when it spawned the group: its answers
+   * after it settle the agent's work only once they follow the result. */
+  since?: number;
+  /** The inputs of the run that spawned the group, when it did: the
+   * group is withdrawn if that run fails, and only then. All of a run's
+   * inputs settle alike. */
+  run?: number[];
+};
+
+/** Whether the graph reports to an agent instead of the parent. */
+export function isSpawned(
+  graph: GraphRecord,
+): graph is GraphRecord & { owner: GroupOwner } {
+  return graph.owner !== undefined;
+}
 
 export type GraphsState = {
   graphs: Record<string, GraphRecord>;
@@ -122,9 +142,8 @@ export type MessageRecord = {
   from: string;
   to: string;
   text: string;
-  /** Steer a working recipient, or wait until its work ends; absent in
-   * records of earlier builds, which steered. */
-  mode?: "steer" | "followUp";
+  /** Steer a working recipient, or wait until its work ends. */
+  mode: "steer" | "followUp";
   sentAt: number;
   /** Never submitted: the recipient was stopped or gone when the service
    * found the message after a crash. */
@@ -162,6 +181,15 @@ export const DELIVERED_MEMORY = 64;
 
 export function graphDeliveryId(graphId: string, record: GraphRecord): string {
   return `graph:${graphId}@${record.createdAt}`;
+}
+
+/** One attempt to hand a group's result to the agent that spawned it. */
+export function resultsRequestId(
+  graphId: string,
+  record: GraphRecord,
+  attempt: number,
+): string {
+  return `results:${graphId}@${record.createdAt}#${attempt}`;
 }
 
 /** One answer, which delivers once for every request it answered. */

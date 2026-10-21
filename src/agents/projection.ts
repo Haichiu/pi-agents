@@ -12,7 +12,6 @@ import {
 } from "@earendil-works/pi-durable";
 import { isCodemodeModelTool } from "../host/tools.js";
 import { CONTEXT, conversationId } from "./context.js";
-import { DELEGATE_TOOL } from "./delegation.js";
 import {
   activityOf,
   addPartialUsage,
@@ -23,6 +22,7 @@ import {
   sumUsage,
 } from "./derive.js";
 import { type NodeResult, nodeRequestId } from "./graphs.js";
+import { covers, obligationsOf } from "./obligations.js";
 import type { HarnessObserver } from "./observer.js";
 import {
   type AgentRecord,
@@ -30,13 +30,14 @@ import {
   type GraphNodeRecord,
   type GraphRecord,
   graphDeliveryId,
-  requestId,
 } from "./records.js";
+import { SPAWNING_TOOLS, WAIT_TOOL } from "./spawning.js";
 import type { AgentStore } from "./store.js";
 import { endNodes, stages } from "./topology.js";
 import {
   type AgentInfo,
   type AgentResult,
+  type AgentUsage,
   type GraphInfo,
   type GraphNode,
   isThinkingLevel,
@@ -158,10 +159,7 @@ export class Projection {
 
   /** A graph agent's own results wait while its graph's result is due. */
   isHeldByGraph(record: AgentRecord): boolean {
-    return (
-      record.graph !== undefined &&
-      this.graphRecords[record.graph]?.pending === true
-    );
+    return this.graphRecords[record.graph]?.pending === true;
   }
 
   graphOfNode(task: number): GraphRecord | undefined {
@@ -180,7 +178,8 @@ export class Projection {
   }
 
   /** A parent request's outcome. An interrupted request stays open until a
-   * later answer settles it. */
+   * later answer settles it, and so does one answered before the results
+   * of agents the agent spawned. */
   private async outcome(
     id: string,
     name: string,
@@ -190,8 +189,22 @@ export class Projection {
     const known = this.resumed.get(key);
     if (known) return { kind: "answered", result: known };
     const settled = await this.store.requestOutcome(id, name, rid);
-    if (settled?.kind !== "interrupted") return settled;
-    const result = await this.store.resumedAnswer(id, name, settled.since);
+    if (settled === undefined || settled.kind === "failed") return settled;
+    const obligations = obligationsOf(id, this.graphRecords);
+    if (
+      settled.kind === "answered" &&
+      covers(settled.result.entryId, obligations)
+    )
+      return settled;
+    // An intermediate answer: a later one after the results settles it.
+    const since =
+      settled.kind === "answered" ? settled.result.entryId + 1 : settled.since;
+    const result = await this.store.coveringAnswer(
+      id,
+      name,
+      since,
+      obligations,
+    );
     if (!result) return undefined;
     this.resumed.set(key, result);
     return { kind: "answered", result };
@@ -242,9 +255,12 @@ export class Projection {
     const durable = (agent ?? {}) as DurableAgentState;
     const tools = Array.isArray(durable.tools)
       ? durable.tools.filter(
-          (tool) => tool !== DELEGATE_TOOL && !isCodemodeModelTool(tool),
+          (tool) =>
+            !(SPAWNING_TOOLS as readonly string[]).includes(tool) &&
+            !isCodemodeModelTool(tool),
         )
       : undefined;
+    const group = this.graphRecords[record.graph];
     this.agentInfos.set(id, {
       id,
       name: record.name,
@@ -288,16 +304,9 @@ export class Projection {
           }
         : {}),
       ...(jobAnswer !== undefined ? { jobAnswer } : {}),
-      ...(record.graph ? { graph: record.graph } : {}),
-      ...(record.delegate ? { delegates: true } : {}),
-      ...(state === "idle" &&
-      [...outcomes.values()].some(
-        (outcome) =>
-          outcome.kind === "answered" &&
-          !this.carried(answerDeliveryId(id, record, outcome.result.entryId)),
-      )
-        ? { queued: true }
-        : {}),
+      graph: record.graph,
+      ...(record.spawn ? { spawn: true } : {}),
+      ...(group?.owner ? { owner: group.owner.agent } : {}),
     });
     return delivered;
   }
@@ -312,8 +321,7 @@ export class Projection {
   ): Promise<number | undefined> {
     const latest = await this.observer.latestGeneration(agentId);
     if (latest) return latest.endedAt;
-    const graph =
-      record.graph === undefined ? undefined : this.graphRecords[record.graph];
+    const graph = this.graphRecords[record.graph];
     const node = graph?.nodes.find((each) => each.agent === agentId);
     return node
       ? (await this.observer.settledTask(node.task))?.endedAt
@@ -321,19 +329,18 @@ export class Projection {
   }
 
   /**
-   * The entry that answered the agent's job: the answer to the submission
-   * of its job, under `parent:1` for agents the parent started and under
-   * its node's request ID for a graph's agents.
+   * The entry that answered the agent's job, submitted under its node's
+   * request ID.
    */
   private async jobAnswer(
     agentId: string,
     record: AgentRecord,
   ): Promise<number | undefined> {
-    const graph =
-      record.graph === undefined ? undefined : this.graphRecords[record.graph];
+    const graph = this.graphRecords[record.graph];
     const node = graph?.nodes.find((each) => each.agent === agentId);
-    const rid = node ? nodeRequestId(node.task) : requestId(1);
-    return this.observer.jobAnswer(agentId, rid);
+    return node
+      ? this.observer.jobAnswer(agentId, nodeRequestId(node.task))
+      : undefined;
   }
 
   /**
@@ -347,8 +354,7 @@ export class Projection {
     record: AgentRecord,
     result: AgentResult | undefined,
   ): Promise<AgentInfo["state"] | undefined> {
-    const graph =
-      record.graph === undefined ? undefined : this.graphRecords[record.graph];
+    const graph = this.graphRecords[record.graph];
     const node = graph?.nodes.find((each) => each.agent === agentId);
     if (!graph || !node) return undefined;
     const outcome = await this.observer.taskOutcome(node.task);
@@ -358,6 +364,9 @@ export class Projection {
         if (task !== undefined && !(await this.observer.isFinished(task)))
           return "waiting";
       }
+      // Once the agent ran, its job waits for an answer that settles it,
+      // and the conversation tells how the agent is.
+      if (result || this.observer.settlementOf(agentId)) return undefined;
       return "working";
     }
     if (result) return undefined;
@@ -461,6 +470,8 @@ export class Projection {
           }),
         ),
         ...(record.owner ? { owner: record.owner.agent } : {}),
+        ...(record.single ? { single: true } : {}),
+        ...(record.cancelled ? { cancelled: true } : {}),
         ...(record.pending &&
         ended !== undefined &&
         !isStopped &&
@@ -469,44 +480,75 @@ export class Projection {
           : {}),
       });
     }
-    this.deriveDelegation();
+    this.deriveQueued();
+    this.deriveSpawning();
     return stopped;
   }
 
+  /** A hidden single graph's queued result shows on its visible agent. */
+  private deriveQueued(): void {
+    for (const [id, info] of this.agentInfos) {
+      const record = this.records[id];
+      if (!record) continue;
+      const graph = this.graphInfoById.get(record.graph);
+      const outcomes = this.settled.get(id);
+      const queued =
+        info.state === "idle" &&
+        ((graph?.single && graph.queued) ||
+          [...(outcomes?.values() ?? [])].some(
+            (outcome) =>
+              outcome.kind === "answered" &&
+              !this.carried(
+                answerDeliveryId(id, record, outcome.result.entryId),
+              ),
+          ));
+      if (queued) info.queued = true;
+      else delete info.queued;
+    }
+  }
+
   /**
-   * What delegation adds to the derived infos: a graph's usage includes the
+   * What spawning adds to the derived infos: a graph's usage includes the
    * helpers its agents started, and an agent that waits for helpers shows
    * their progress instead of its tool.
    */
-  private deriveDelegation(): void {
+  private deriveSpawning(): void {
     const owned = new Map<string, GraphInfo[]>();
     for (const graph of this.graphInfoById.values())
       if (graph.owner)
         owned.set(graph.owner, [...(owned.get(graph.owner) ?? []), graph]);
-    for (const graph of this.graphInfoById.values()) {
-      if (graph.owner) continue;
-      const nested = graph.nodes.flatMap(
-        (node) => owned.get(node.agentId) ?? [],
-      );
-      if (nested.length > 0)
-        graph.usage = sumUsage([
-          graph.usage,
-          ...nested.map((each) => each.usage),
-        ]);
-    }
+    // A graph's usage includes the graphs its agents spawned, all the way
+    // down; ownership has no cycles.
+    const own = new Map(
+      [...this.graphInfoById.values()].map((graph) => [graph.id, graph.usage]),
+    );
+    const totals = new Map<string, AgentUsage>();
+    const total = (graph: GraphInfo): AgentUsage => {
+      const known = totals.get(graph.id);
+      if (known) return known;
+      const usage = sumUsage([
+        own.get(graph.id) ?? graph.usage,
+        ...graph.nodes.flatMap((node) =>
+          (owned.get(node.agentId) ?? []).map(total),
+        ),
+      ]);
+      totals.set(graph.id, usage);
+      return usage;
+    };
+    for (const graph of this.graphInfoById.values()) graph.usage = total(graph);
     for (const info of this.agentInfos.values()) {
       const working = (owned.get(info.id) ?? []).find(
         (graph) => graph.state === "working",
       );
-      const { delegation: _, ...activity } = info.activity;
+      const { spawning: _, ...activity } = info.activity;
       if (!working) {
         info.activity = activity;
         continue;
       }
-      if (activity.tool === DELEGATE_TOOL) delete activity.tool;
+      if (activity.tool === WAIT_TOOL) delete activity.tool;
       info.activity = {
         ...activity,
-        delegation: {
+        spawning: {
           graph: working.name,
           done: working.nodes.filter((node) => node.outcome).length,
           total: working.nodes.length,

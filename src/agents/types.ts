@@ -92,8 +92,8 @@ export interface AgentActivity {
   retry?: string;
   /** A compaction is running. */
   compacting?: boolean;
-  /** The agent waits for helpers it started: its graph, and progress. */
-  delegation?: { graph: string; done: number; total: number };
+  /** The agent waits for agents it spawned: their graph, and progress. */
+  spawning?: { graph: string; done: number; total: number };
 }
 
 export interface AgentInfo {
@@ -127,8 +127,11 @@ export interface AgentInfo {
   jobAnswer?: number;
   /** The graph this agent belongs to, by graph ID. */
   graph?: string;
-  /** Whether the agent can start helper agents. */
-  delegates?: boolean;
+  /** Whether the agent may spawn agents of its own. */
+  spawn?: boolean;
+  /** The agent that spawned this one, by agent ID; absent for the
+   * parent's agents. */
+  owner?: string;
   /** An answer waits for delivery to the parent, which is still busy. */
   queued?: boolean;
 }
@@ -200,16 +203,45 @@ export interface GraphInfo {
   endedAt?: number;
   /** Agents in stages: each after the agents it waits for. */
   nodes: GraphNode[];
-  /** Summed over the graph's agents and the helpers they started. */
+  /** Summed over the graph's agents and the agents they spawned. */
   usage: AgentUsage;
-  /** The agent that started this graph as its helpers, by agent ID. */
+  /** The agent that spawned this graph, by agent ID. */
   owner?: string;
   /** The graph's result waits for delivery to the parent. */
   queued?: boolean;
+  /** One agent the parent started on its own: shown as the agent. */
+  single?: boolean;
+  /** Withdrawn with the work that needed it; its result reaches nobody. */
+  cancelled?: boolean;
 }
 
-/** How many agents a graph has. */
-export const GRAPH_SIZE = { min: 2, max: 12 } as const;
+/** How many agents one spawn starts. */
+export const GRAPH_SIZE = { min: 1, max: 12 } as const;
+
+/** How `agent_spawn` takes its agents, in full for its error; the
+ * schema shows it more briefly. */
+const SPAWN_SHAPE =
+  'Arguments are always an agents array, also for a single agent: {"agents": [{"name": "lead", "job": "...", "spawn": true}]}. Each agent\'s fields, such as job, name, model, after, and spawn, go in its own entry; only the group\'s name and failFast sit beside agents.';
+
+/** The arguments of `agent_spawn` beside `agents`. */
+const GROUP_FIELDS = new Set(["name", "agents", "failFast"]);
+
+/** Reject `agent_spawn` arguments that put an agent's fields beside
+ * `agents`, with how to write them instead. Validation reports what else
+ * is wrong. */
+export function checkSpawnShape(args: unknown): unknown {
+  if (typeof args !== "object" || args === null) return args;
+  const misplaced = Object.keys(args).filter((key) => !GROUP_FIELDS.has(key));
+  if (misplaced.length > 0)
+    throw new AgentError(
+      `Move ${misplaced.join(", ")} into an entry of agents. ${SPAWN_SHAPE}`,
+    );
+  return args;
+}
+
+/** How deep agents nest: the parent's agents are at depth 1, and an agent
+ * at the deepest level can't spawn. */
+export const MAX_DEPTH = 3;
 
 export interface GraphAgentSpec extends SpawnSpec {
   /** Names of agents of the same graph whose results this agent needs. */
@@ -259,11 +291,11 @@ export interface SpawnSpec {
   instructions?: string;
   /** Whether the agent sees the ambient skill catalog. */
   ambientSkills?: boolean;
-  /** Whether the agent can start helper agents. */
-  delegate?: boolean;
+  /** Whether the agent may spawn agents of its own. */
+  spawn?: boolean;
 }
 
-/** What a delegating agent asks for one helper. */
+/** What a spawning agent asks for one of its agents. */
 export interface HelperRequest {
   job: string;
   profile?: string;
@@ -272,6 +304,8 @@ export interface HelperRequest {
   tools?: string[];
   /** Skills to inline instead of the skill catalog. */
   skills?: string[];
+  /** Whether the agent may spawn agents of its own. */
+  spawn?: boolean;
 }
 
 /** Settings a helper inherits from the agent that starts it. */
@@ -283,7 +317,7 @@ export interface HelperDefaults {
 
 /**
  * Resolves a helper's profile, model, and skills like the parent's spawns, with the
- * delegating agent's settings as defaults. The session host provides it;
+ * spawning agent's settings as defaults. The session host provides it;
  * it throws `AgentError` for what it can't resolve.
  */
 export type HelperResolver = (
@@ -346,23 +380,4 @@ export class WaitInterrupted extends AgentError {
       reason === "cancelled" ? "Wait cancelled" : "Wait ended for the parent",
     );
   }
-}
-
-/**
- * Arguments with each agent's `task` renamed to `job`, its name before
- * pi-agents left "task" to pi-durable, so calls of earlier builds replay and
- * models used to the old name still work.
- */
-export function renameTaskToJob(args: unknown): unknown {
-  if (typeof args !== "object" || args === null) return args;
-  const rename = (value: unknown): unknown => {
-    if (typeof value !== "object" || value === null || Array.isArray(value))
-      return value;
-    const { task, ...rest } = value as Record<string, unknown>;
-    return task === undefined || "job" in rest ? rest : { ...rest, job: task };
-  };
-  const renamed = rename(args) as Record<string, unknown>;
-  return Array.isArray(renamed.agents)
-    ? { ...renamed, agents: renamed.agents.map(rename) }
-    : renamed;
 }

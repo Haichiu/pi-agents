@@ -204,12 +204,18 @@ describe("graphs", () => {
     });
     await until(() => service.get("pair-1")?.state === "working");
     await service.interrupt("pair-1");
+    await until(() => service.get("pair-2")?.result !== undefined);
+    // An interrupt corrects the agent; its node stays open.
+    expect(service.get("pair-1")?.state).toBe("interrupted");
+    expect(service.getGraph("pair")?.state).toBe("working");
+    expect(service.pendingDeliveries()).toEqual([]);
+    await service.send("pair-1", "go on");
     await until(() => service.pendingDeliveries().length > 0);
     expect(summary(graphDelivery(service.pendingDeliveries()))).toEqual([
-      "pair-1: interrupted",
+      "pair-1: done: go on",
       "pair-2: done: two",
     ]);
-    expect(service.getGraph("pair")?.state).toBe("interrupted");
+    expect(service.getGraph("pair")?.state).toBe("idle");
   });
 
   test("stopping a graph stops its agents bottom-up", async () => {
@@ -330,7 +336,9 @@ describe("graphs", () => {
 
   test("graphs share names with agents and start whole or not at all", async () => {
     const service = await open({ models: scripted().models });
-    await service.spawn({ job: "x", name: "taken", cwd: ".", model: MODEL });
+    await service.spawnGraph({
+      agents: [{ job: "x", name: "taken", cwd: ".", model: MODEL }],
+    });
     await expect(
       service.spawnGraph({ name: "taken", agents: agents("a", "b") }),
     ).rejects.toThrow("already exists");
@@ -347,7 +355,9 @@ describe("graphs", () => {
 
     await service.spawnGraph({ agents: agents("a", "b") });
     await expect(
-      service.spawn({ job: "x", name: "graph", cwd: ".", model: MODEL }),
+      service.spawnGraph({
+        agents: [{ job: "x", name: "graph", cwd: ".", model: MODEL }],
+      }),
     ).rejects.toThrow("already exists");
     await expect(service.send("graph", "hi", "auto")).rejects.toThrow(
       "graph is a graph. Message its agents instead: graph-1, graph-2",

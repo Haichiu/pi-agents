@@ -1,29 +1,24 @@
-/**
- * Agent creation: validates jobs, tools, and names, and creates standalone
- * agents or graphs in their creating commits, before the service refreshes.
- */
+/** Create the parent's graphs atomically, after validating jobs, tools, and names. */
 
 import {
-  AgentDoc,
   type Conversation,
   configure,
   type Extension,
   type Harness,
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
-import { CODEMODE_TOOL_NAME } from "@earendil-works/pi-durable/codemode";
 import type { AgentExtensionState } from "../hooks.js";
 import {
   DEFAULT_AGENT_TOOLS,
   isCodemodeModelTool,
   withCodemodeModels,
 } from "../host/tools.js";
-import { CONTEXT, conversationId } from "./context.js";
-import { DELEGATE_TOOL } from "./delegation.js";
+import { CONTEXT } from "./context.js";
 import { type AgentExtensions, agentSelection } from "./extensions.js";
 import { GraphTask, NodeTask } from "./graphs.js";
 import { claimName, NAME_BASE_LENGTH, takenNames } from "./names.js";
-import { AgentsDoc, GraphsDoc, type ParentRequest } from "./records.js";
+import { AgentsDoc, GraphsDoc } from "./records.js";
+
 import { resolveEdges } from "./topology.js";
 import {
   AgentError,
@@ -45,7 +40,7 @@ export interface CreationDeps {
 }
 
 /** Validate a spawn's job, thinking level, and tools. */
-export function prepare(
+function prepare(
   deps: CreationDeps,
   spec: SpawnSpec,
 ): { job: string; tools: ToolRegistration[] } {
@@ -57,61 +52,13 @@ export function prepare(
   return { job, tools };
 }
 
-/** Create an agent and record its job before the service submits it. */
-export async function createAgent(
-  deps: CreationDeps,
-  spec: SpawnSpec,
-  prepared: {
-    job: string;
-    tools: ToolRegistration[];
-    first: string;
-    request: ParentRequest;
-  },
-): Promise<string> {
-  const { job, tools, first, request } = prepared;
-  const extensionState = deps.captureExtensionState?.();
-  const createdAt = Date.now();
-  return deps.harness.commit(async (tx) => {
-    const state = await tx.doc(AgentsDoc);
-    const name = claimName(
-      spec.name,
-      spec.profile ?? "agent",
-      takenNames(state, await tx.doc(GraphsDoc), deps.workingClosed()),
-      "agent",
-    );
-    const conversation = await tx.createConversation({
-      ownership: { kind: "ownerless" },
-    });
-    await configure(tx, conversation.id, {
-      cwd: spec.cwd,
-      ...capabilities(deps, tools, spec.delegate),
-      ...(spec.model ? { model: spec.model } : {}),
-      ...(spec.thinking ? { thinkingLevel: spec.thinking } : {}),
-      ...(spec.instructions ? { instructions: spec.instructions } : {}),
-    });
-    state.agents[String(conversation.id)] = {
-      name,
-      profile: spec.profile ?? null,
-      job,
-      createdAt,
-      closed: false,
-      ambientSkills: spec.ambientSkills ?? true,
-      ...(extensionState ? { extensionState } : {}),
-      nextRequest: 2,
-      requests: { [first]: request },
-      delivered: [],
-      ...(spec.delegate ? { delegate: true } : {}),
-    };
-    return String(conversation.id);
-  }, CONTEXT);
-}
-
 /**
  * Start agents that work together and report back as one result. An agent
  * that lists others in `after` starts once they ended and receives their
  * results. One commit creates the graph task, a node task per agent, and
  * each agent's conversation owned by its node; the nodes then send the
- * tasks.
+ * tasks. A graph of one agent is `single`: it takes no name of its own and
+ * shows as its agent.
  */
 export async function createGraph(
   deps: CreationDeps,
@@ -123,7 +70,18 @@ export async function createGraph(
       `A graph has ${GRAPH_SIZE.min} to ${GRAPH_SIZE.max} agents, not ${count}`,
     );
   // Validate with the service's view first; the commit claims for real.
+  const single = count === 1;
   const claim = (taken: Set<string>) => {
+    if (single) {
+      const [only] = spec.agents;
+      const agent = claimName(
+        only?.name ?? spec.name,
+        only?.profile ?? "agent",
+        taken,
+        "agent",
+      );
+      return { graph: agent, agents: [agent] };
+    }
     const graph = claimName(spec.name, "graph", taken, "graph");
     return {
       graph,
@@ -177,7 +135,7 @@ export async function createGraph(
       const { spec: agent } = node;
       await configure(tx, conversation.id, {
         cwd: agent.cwd,
-        ...capabilities(deps, node.tools, agent.delegate),
+        ...capabilities(deps, node.tools, agent.spawn),
         ...(agent.model ? { model: agent.model } : {}),
         ...(agent.thinking ? { thinkingLevel: agent.thinking } : {}),
         ...(agent.instructions ? { instructions: agent.instructions } : {}),
@@ -202,7 +160,8 @@ export async function createGraph(
         requests: {},
         delivered: [],
         graph: String(graph),
-        ...(node.spec.delegate ? { delegate: true } : {}),
+        depth: 1,
+        ...(node.spec.spawn ? { spawn: true } : {}),
       };
     });
     (await tx.doc(GraphsDoc)).graphs[String(graph)] = {
@@ -216,6 +175,7 @@ export async function createGraph(
       })),
       closed: false,
       pending: true,
+      ...(single ? { single: true as const } : {}),
     };
     return { id: String(graph), agents };
   }, CONTEXT);
@@ -223,25 +183,20 @@ export async function createGraph(
 
 /**
  * The tools and extensions of a new agent, named explicitly, so the
- * harness's default selection never reaches it. A delegating agent also
- * selects the delegation extension and its tool, so only it can start
- * helpers.
+ * harness's default selection never reaches it. An agent that may spawn
+ * also selects the spawning tools, so only it can spawn agents.
  */
 function capabilities(
   deps: CreationDeps,
   tools: ToolRegistration[],
-  delegate: boolean | undefined,
+  spawn: boolean | undefined,
 ): { tools: ToolRegistration[]; extensions: Extension[] } {
   const extensions = agentSelection(deps.extensions, {
-    delegate: !!delegate,
+    spawn: !!spawn,
     messaging: true,
   });
   const extra = [
-    ...(delegate
-      ? (deps.extensions.delegation.tools ?? []).filter(
-          (each) => each.name === DELEGATE_TOOL,
-        )
-      : []),
+    ...(spawn ? (deps.extensions.spawning.tools ?? []) : []),
     ...(deps.extensions.messaging.tools ?? []),
   ];
   return { tools: [...tools, ...extra], extensions };
@@ -269,42 +224,4 @@ function resolveTools(
     ),
     all,
   );
-}
-
-/**
- * Enable the internal tools of `codemode` for agents stored before its
- * scripts had `models.*`, so every agent with `codemode` can call
- * `models.classify()` and `models.generateImages()`. Agents without
- * `codemode` stay as they are.
- */
-export async function enableCodemodeModels(
-  deps: CreationDeps,
-  ids: readonly string[],
-): Promise<void> {
-  const internal = (deps.extensions.tools.tools ?? [])
-    .map((tool) => tool.name)
-    .filter(isCodemodeModelTool);
-  const lacking: string[] = [];
-  for (const id of ids) {
-    const agent = await deps.harness.snapshot(
-      AgentDoc,
-      conversationId(id),
-      CONTEXT,
-    );
-    const tools = agent?.tools;
-    if (
-      Array.isArray(tools) &&
-      tools.includes(CODEMODE_TOOL_NAME) &&
-      internal.some((name) => !tools.includes(name))
-    )
-      lacking.push(id);
-  }
-  if (lacking.length === 0) return;
-  await deps.harness.commit(async (tx) => {
-    for (const id of lacking) {
-      const { tools } = await tx.doc(AgentDoc, conversationId(id));
-      if (!Array.isArray(tools)) continue;
-      for (const name of internal) if (!tools.includes(name)) tools.push(name);
-    }
-  }, CONTEXT);
 }

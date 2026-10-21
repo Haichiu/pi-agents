@@ -8,9 +8,12 @@ import {
   fauxAssistantMessage,
   fauxProvider,
 } from "@earendil-works/pi-ai/providers/faux";
-import { MemoryStorage, type Storage } from "@earendil-works/pi-durable";
+import {
+  type HookRegistration,
+  MemoryStorage,
+  type Storage,
+} from "@earendil-works/pi-durable";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
-import type { DelegationLimits } from "../../src/agents/delegation.js";
 import {
   type AgentExtensions,
   createAgentExtensions,
@@ -26,6 +29,7 @@ import {
   AgentService,
   type AgentServiceOptions,
 } from "../../src/agents/service.js";
+import type { SpawningLimits } from "../../src/agents/spawn-support.js";
 import type { HelperResolver } from "../../src/agents/types.js";
 import type { SkillSource } from "../../src/catalog/skills.js";
 import type { AgentHooks } from "../../src/hooks.js";
@@ -56,6 +60,32 @@ export function lastUserText(
     : last.content
         .flatMap((block) => (block.type === "text" ? [block.text] : []))
         .join("");
+}
+
+/** The text of a message's content. */
+export function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  return ((content ?? []) as Array<{ type: string; text?: string }>)
+    .flatMap((block) => (block.type === "text" ? [block.text ?? ""] : []))
+    .join("");
+}
+
+/** A promise that tests resolve when they choose. */
+export function gate(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+/** Models whose every response comes from `step`. */
+export function fauxModels(step: FauxResponseStep) {
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses(Array.from({ length: 200 }, () => step));
+  return models;
 }
 
 /** Resolves once the request aborts: a model that never finishes on its
@@ -147,14 +177,16 @@ export async function jsonlStorage(directory: string): Promise<Storage> {
   return openNodeJsonlStorage(directory, BACKGROUND_CONTEXT);
 }
 
-/** Helpers inherit their agent's settings and take only a tool allowlist;
- * the session host resolves profiles, models, and skills. */
+/** Spawned agents inherit their agent's settings and take only a tool
+ * allowlist and whether they may spawn; the session host resolves
+ * profiles, models, and skills. */
 export const inheritHelper: HelperResolver = async (request, defaults) => ({
   job: request.job,
   cwd: defaults.cwd,
   ...(defaults.model ? { model: defaults.model } : {}),
   ...(defaults.thinking ? { thinking: defaults.thinking } : {}),
   ...(request.tools ? { tools: request.tools } : {}),
+  ...(request.spawn ? { spawn: true } : {}),
 });
 
 /**
@@ -215,10 +247,13 @@ export interface HostOptions {
   /** Whether the project is trusted, and its skills. */
   trusted?: boolean;
   skills?: SkillSource;
-  delegationLimits?: Partial<DelegationLimits>;
+  spawningLimits?: Partial<SpawningLimits>;
   /** Hooks into messaging between agents. */
   messaging?: MessagingOptions;
   maxWorkingAgents?: number;
+  /** Harness hooks on agents' tasks, such as their tools. */
+  taskHooks?: readonly HookRegistration[];
+  refreshDelayMs?: number;
 }
 
 /** What a test host opened for a service: the harness and its anchor. */
@@ -238,9 +273,12 @@ export function testExtensions(options: HostOptions = {}): AgentExtensions {
       skills: options.skills ?? (async () => []),
     },
     resolveHelper: inheritHelper,
-    hooks: beforeRequestHooks("test-parent", options.hooks ?? []),
-    ...(options.delegationLimits
-      ? { delegationLimits: options.delegationLimits }
+    hooks: [
+      ...beforeRequestHooks("test-parent", options.hooks ?? []),
+      ...(options.taskHooks ?? []),
+    ],
+    ...(options.spawningLimits
+      ? { spawningLimits: options.spawningLimits }
       : {}),
     ...(options.messaging ? { messaging: options.messaging } : {}),
     ...(options.maxWorkingAgents
@@ -269,7 +307,7 @@ export async function openService(
       anchor: harness.anchor,
       extensions,
       parent,
-      refreshDelayMs: TEST_REFRESH_MS,
+      refreshDelayMs: options.refreshDelayMs ?? TEST_REFRESH_MS,
       captureExtensionState: options.captureExtensionState,
     });
     harness.harness.resume();

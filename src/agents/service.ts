@@ -11,24 +11,32 @@ import type { AttachedReplicatedState } from "@earendil-works/chord";
 import type {
   Conversation,
   ConversationView,
+  Cursor,
   Harness,
+  TaskId,
 } from "@earendil-works/pi-durable";
 import { CONTEXT, contextFor, conversationId, taskId } from "./context.js";
-import {
-  type CreationDeps,
-  createAgent,
-  createGraph,
-  enableCodemodeModels,
-  prepare,
-} from "./creation.js";
+import { type CreationDeps, createGraph } from "./creation.js";
 import { Delivery } from "./delivery.js";
 import type { AgentExtensions } from "./extensions.js";
 import { MessageLog } from "./message-log.js";
-import { claimName } from "./names.js";
+import {
+  obligationsOf,
+  RESULTS_ENTRY,
+  RESULTS_PREFIX,
+  type ResultsEntryData,
+} from "./obligations.js";
 import { HarnessObserver } from "./observer.js";
 import type { Parent } from "./parent.js";
 import { Projection } from "./projection.js";
-import { type ParentRequest, requestId } from "./records.js";
+import {
+  type GraphRecord,
+  graphDeliveryId,
+  isSpawned,
+  type ParentRequest,
+  resultsRequestId,
+} from "./records.js";
+import { groupResult } from "./spawning.js";
 import { AgentStore } from "./store.js";
 import {
   AgentError,
@@ -38,7 +46,6 @@ import {
   type MessageInfo,
   type PendingDelivery,
   type SendMode,
-  type SpawnSpec,
   type Target,
   type TargetRef,
   type TaskNode,
@@ -48,6 +55,11 @@ import {
 import { Waits } from "./waits.js";
 
 const REFRESH_DELAY_MS = 50;
+
+/** A group that must stop: withdrawn, or stopped by request. */
+function needsStop(graph: GraphRecord): boolean {
+  return graph.cancelled === true || graph.stopped === true;
+}
 
 export interface AgentServiceOptions {
   /** Host-owned creation hooks, outside the durable transaction. */
@@ -69,11 +81,8 @@ export interface AgentServiceOptions {
 export interface WaitOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
-  /** The parent call that waits, whose result carries the results to the
-   * parent; `call` is its key, if it has one, by which the parent
-   * recognizes the result where it doesn't name the results, such as a
-   * nested call's. */
-  carrier?: { call?: string };
+  /** The direct parent wait carries delivery IDs in its saved result. */
+  carrier?: boolean;
 }
 
 export interface WaitOutcome {
@@ -113,6 +122,7 @@ export class AgentService {
   private readonly extensions: AgentExtensions;
   private readonly parent: Parent;
   private readonly refreshDelayMs: number;
+  private readonly onReport: (error: unknown) => void;
 
   private constructor(options: AgentServiceOptions) {
     this.harness = options.harness;
@@ -120,6 +130,7 @@ export class AgentService {
     this.extensions = options.extensions;
     this.parent = options.parent;
     this.refreshDelayMs = options.refreshDelayMs ?? REFRESH_DELAY_MS;
+    this.onReport = options.onReport ?? (() => {});
     this.messageLog = new MessageLog({
       store: this.store,
       agents: () => this.projection.agents(),
@@ -163,6 +174,7 @@ export class AgentService {
       workingClosed: () => this.workingClosed(),
     };
     this.extensions.hub.state = (id) => this.projection.info(id)?.state;
+    this.extensions.hub.stop = (target) => this.stopTarget(target);
   }
 
   /**
@@ -183,12 +195,13 @@ export class AgentService {
   // --- Lifecycle ---
 
   private async initialize(): Promise<void> {
+    // Work a crash left running behind a stop fence ends before it can
+    // go on: the stop may have recorded the fence before its aborts.
+    // Before observing, whose refreshes can resume scheduling.
+    const stopped = await this.markStoppedWork();
     this.observer.start();
     await this.projection.reload();
-    await enableCodemodeModels(
-      this.creation,
-      Object.keys(this.projection.agents()),
-    );
+    for (const id of stopped) await this.abortAgent(id);
     for (const id of Object.keys(this.projection.agents())) {
       await this.observer.loadLastAssistant(id);
       // A request recorded before a crash may lack its submission.
@@ -202,17 +215,52 @@ export class AgentService {
     );
   }
 
+  /**
+   * Mark the live work of stopped agents aborted, all before anything
+   * resumes scheduling, as aborting a conversation does, so none of it
+   * runs again. Returns the agents that had live work.
+   */
+  private async markStoppedWork(): Promise<string[]> {
+    const agents = await this.store.loadAgents();
+    const stopped = new Set(
+      Object.keys(agents).filter((id) => agents[id]?.stopped),
+    );
+    if (stopped.size === 0) return [];
+    const tasks = await this.harness.commit(async (tx) => {
+      const found: Array<{ id: TaskId; agent: string }> = [];
+      for (const status of ["pending", "running", "waiting"] as const) {
+        let cursor: Cursor | undefined;
+        do {
+          const query = { status, background: false };
+          const page = await tx.scanTasks(query, 256, cursor);
+          for (const task of page.items) {
+            const agent = String(task.conversationId);
+            if (stopped.has(agent)) found.push({ id: task.id, agent });
+          }
+          cursor = page.next;
+        } while (cursor !== undefined);
+      }
+      return found;
+    }, CONTEXT);
+    for (const task of tasks) await this.harness.abortTask(task.id, CONTEXT);
+    return [...new Set(tasks.map((task) => task.agent))];
+  }
+
   /** Stop observing the harness; the host closes it afterwards. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.extensions.hub.state = () => undefined;
+    this.extensions.hub.stop = async () => {
+      throw new AgentError("Agents are closing");
+    };
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.observer.stop();
     this.unsubscribeParent?.();
     this.listeners.clear();
     this.waits.check();
     await this.refreshChain.catch(() => {});
+    await this.reconcileChain.catch(() => {});
     await this.delivery.settle();
   }
 
@@ -237,10 +285,18 @@ export class AgentService {
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
-  /** Visible graphs, oldest first; `includeClosed` adds closed ones. */
-  graphs(options: { includeClosed?: boolean } = {}): GraphInfo[] {
+  /** Visible graphs, oldest first; `includeClosed` adds closed ones.
+   * Graphs of one agent the parent started show as their agents; with
+   * `includeSingle`, they're listed too. */
+  graphs(
+    options: { includeClosed?: boolean; includeSingle?: boolean } = {},
+  ): GraphInfo[] {
     return [...this.projection.graphInfos()]
       .filter((info) => options.includeClosed || isGraphVisible(info))
+      .filter(
+        (info) =>
+          options.includeSingle || !info.single || info.owner !== undefined,
+      )
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
@@ -254,33 +310,35 @@ export class AgentService {
     return this.messageLog.list();
   }
 
-  /** A visible agent by name, else the newest closed one, else by ID. */
+  /** An agent by exact ID, else visible name, else newest closed name. */
   get(nameOrId: string): AgentInfo | undefined {
+    const exact = this.projection.info(nameOrId);
+    if (exact) return exact;
     const named = this.list({ includeClosed: true }).filter(
       (info) => info.name === nameOrId,
     );
-    return (
-      named.find(isVisible) ?? named.at(-1) ?? this.projection.info(nameOrId)
-    );
+    return named.find(isVisible) ?? named.at(-1);
   }
 
-  /** A visible graph by name, else the newest closed one, else by ID. */
+  /** A graph by exact ID, else visible name, else newest closed name. */
   getGraph(nameOrId: string): GraphInfo | undefined {
+    const exact = this.projection.graphInfo(nameOrId);
+    if (exact) return exact;
     const named = this.graphs({ includeClosed: true }).filter(
       (info) => info.name === nameOrId,
     );
-    return (
-      named.find(isGraphVisible) ??
-      named.at(-1) ??
-      this.projection.graphInfo(nameOrId)
-    );
+    return named.find(isGraphVisible) ?? named.at(-1);
   }
 
   /**
-   * An agent or a graph: a visible one by name, else the newest closed one,
-   * else by ID. Names are unique among visible agents and graphs.
+   * An agent or graph by exact ID, else visible name, else newest closed
+   * name. Names are unique among visible agents and graphs.
    */
   find(nameOrId: string): Target | undefined {
+    const exactAgent = this.projection.info(nameOrId);
+    if (exactAgent) return { kind: "agent", info: exactAgent };
+    const exactGraph = this.projection.graphInfo(nameOrId);
+    if (exactGraph) return { kind: "graph", info: exactGraph };
     const agent = this.get(nameOrId);
     const graph = this.getGraph(nameOrId);
     const named = (info: { name: string } | undefined) =>
@@ -366,24 +424,6 @@ export class AgentService {
 
   // --- Operations ---
 
-  /** Create an agent and send it its job. */
-  async spawn(spec: SpawnSpec): Promise<AgentInfo> {
-    // Fail early with the service's view; the commit claims for real.
-    claimName(spec.name, spec.profile ?? "agent", this.takenNames(), "agent");
-    const { job, tools } = prepare(this.creation, spec);
-    const first = requestId(1);
-    const request: ParentRequest = { message: job, whenBusy: "followUp" };
-    const id = await createAgent(this.creation, spec, {
-      job,
-      tools,
-      first,
-      request,
-    });
-    await this.store.submit(id, first, request);
-    await this.refresh([id]);
-    return this.requireAgent(id);
-  }
-
   /**
    * Start agents that work together and report back as one result. An agent
    * that lists others in `after` starts once they ended and receives their
@@ -429,6 +469,11 @@ export class AgentService {
       CONTEXT,
     );
     if (!conversation) throw new AgentError(`Agent ${info.name} is missing`);
+    // Input would start it without its job.
+    if (await this.store.awaitsJob(info.id))
+      throw new AgentError(
+        `${info.name} waits for the agents its job needs and hasn't started yet`,
+      );
     if (this.projection.agents()[info.id]?.stopped)
       await this.store.clearStopped(info.id);
     await conversation.submit(
@@ -448,7 +493,12 @@ export class AgentService {
       conversationId(info.id),
       CONTEXT,
     );
-    await conversation?.abort(CONTEXT);
+    // Under its turn, so results never land between the abort and the
+    // watermark.
+    await this.extensions.hub.turn(info.id, async () => {
+      await conversation?.abort(CONTEXT);
+      await this.store.markInterrupted(info.id);
+    });
     await this.refresh(this.projection.withHelpers([info.id]));
   }
 
@@ -456,16 +506,28 @@ export class AgentService {
    * End an agent or a graph. An agent's work is interrupted, its pending
    * parent requests dropped, and it closes; storage keeps its conversation,
    * and messaging it later reopens it. A graph is aborted with its agents,
-   * delivers nothing, and closes with them.
+   * delivers nothing to the parent, and closes with them; an agent that
+   * spawned it gets its result. Either way, the groups the stopped agents
+   * spawned stop too. Stopping the agent of a graph of one stops the graph.
    */
   async stop(nameOrId: string): Promise<Target> {
     const target = this.requireTarget(nameOrId);
-    if (target.kind === "graph") {
-      await this.stopGraph(target.info.id);
-      return { kind: "graph", info: this.requireGraph(target.info.id) };
-    }
-    await this.stopAgent(target.info.id);
-    return { kind: "agent", info: this.requireAgent(target.info.id) };
+    await this.stopTarget({ kind: target.kind, id: target.info.id });
+    return target.kind === "graph"
+      ? { kind: "graph", info: this.requireGraph(target.info.id) }
+      : { kind: "agent", info: this.requireAgent(target.info.id) };
+  }
+
+  /** `stop`, by ID. */
+  async stopTarget(target: TargetRef): Promise<void> {
+    if (target.kind === "graph") return this.stopGraph(target.id);
+    const record = (await this.store.loadAgents())[target.id];
+    const graph = record?.graph
+      ? (await this.store.loadGraphs())[record.graph]
+      : undefined;
+    if (record?.graph && graph?.single && !graph.owner)
+      return this.stopGraph(record.graph);
+    await this.stopAgent(target.id);
   }
 
   /**
@@ -475,20 +537,36 @@ export class AgentService {
    * leaves an interrupted agent, never a stopped one whose work resumes.
    */
   private async stopAgent(agentId: string): Promise<void> {
+    let stopped: string[] = [];
     await this.extensions.hub.turn(agentId, async () => {
-      const conversation = await this.harness.conversation(
-        conversationId(agentId),
-        CONTEXT,
-      );
-      await conversation?.abort(CONTEXT);
-      await this.store.markStopped(agentId);
+      await this.abortAgent(agentId);
+      stopped = await this.store.markStopped(agentId);
+      // Again, for work that started between the abort and the stop, such
+      // as the job of a graph's agent; nothing starts after the stop.
+      await this.abortAgent(agentId);
     });
-    this.projection.clearSettled(agentId);
-    await this.refresh(this.projection.withHelpers([agentId]));
+    // The agents below it stopped with it: end their work in their turns,
+    // so a send to one lands before and is aborted, or is refused.
+    for (const id of stopped.slice(1))
+      await this.extensions.hub.turn(id, () => this.abortAgent(id));
+    for (const id of stopped) this.projection.clearSettled(id);
+    await this.refresh(this.projection.withHelpers(stopped));
+    // Their groups were withdrawn with them; stop them now.
+    await this.reconcile();
+  }
+
+  private async abortAgent(agentId: string): Promise<void> {
+    const conversation = await this.harness.conversation(
+      conversationId(agentId),
+      CONTEXT,
+    );
+    await conversation?.abort(CONTEXT);
   }
 
   private async stopGraph(graphId: string): Promise<void> {
-    const info = this.requireGraph(graphId);
+    // Nested tools can stop a group before the next projection refresh.
+    const graph = (await this.store.loadGraphs())[graphId];
+    if (!graph) throw new AgentError(`No graph with ID ${graphId}`);
     const finished = await this.observer.isFinished(Number(graphId));
     await this.store.stopGraph(graphId, !finished);
     // Aborting the graph aborts its nodes, and they their agents, bottom-up.
@@ -497,9 +575,9 @@ export class AgentService {
       await this.harness.waitForTask(taskId(graphId), CONTEXT);
     }
     // Agents may work beyond their job, for example on a user's message.
-    for (const node of info.nodes) await this.stopAgent(node.agentId);
+    for (const node of graph.nodes) await this.stopAgent(node.agent);
     await this.refresh(
-      this.projection.withHelpers(info.nodes.map((node) => node.agentId)),
+      this.projection.withHelpers(graph.nodes.map((node) => node.agent)),
     );
   }
 
@@ -523,11 +601,24 @@ export class AgentService {
     );
   }
 
-  /** `wait`, for agents and graphs by their IDs. */
+  /** `wait`, for agents and graphs by their IDs. The agent of a graph of
+   * one stands for its graph while the parent awaits the graph's result. */
   async waitFor(
-    targets: readonly TargetRef[],
+    requested: readonly TargetRef[],
     options: WaitOptions = {},
   ): Promise<WaitOutcome> {
+    const targets = requested.map((target): TargetRef => {
+      if (target.kind !== "agent") return target;
+      const graphId = this.projection.agents()[target.id]?.graph;
+      const graph =
+        graphId === undefined ? undefined : this.projection.graphs()[graphId];
+      return graphId !== undefined &&
+        graph?.single &&
+        graph.pending &&
+        !this.delivery.isInFlight(graphDeliveryId(graphId, graph))
+        ? { kind: "graph", id: graphId }
+        : target;
+    });
     for (const target of targets)
       if (target.kind === "agent") this.requireAgent(target.id);
       else this.requireGraph(target.id);
@@ -568,7 +659,17 @@ export class AgentService {
             CONTEXT,
           );
           try {
-            await conversation?.waitForIdle(contextFor(signal));
+            // An agent owed the results of agents it spawned answers again
+            // once they arrive; its answers before don't count.
+            for (;;) {
+              await conversation?.waitForIdle(contextFor(signal));
+              await this.refresh([id]);
+              if (!this.owesResults(id)) break;
+              if (
+                !(await this.waits.until(() => !this.owesResults(id), signal))
+              )
+                return;
+            }
             idle.add(id);
           } catch (error) {
             if (!signal?.aborted) throw error;
@@ -585,14 +686,9 @@ export class AgentService {
         ...[...ended].flatMap((id) => this.delivery.graphDelivery(id) ?? []),
         ...[...idle].flatMap((id) => this.delivery.agentDeliveries(id)),
       ].filter((each) => !this.delivery.isInFlight(each.id));
-      if (options.carrier === undefined)
-        await this.delivery.acknowledgeAll(taken);
+      if (!options.carrier) await this.delivery.acknowledgeAll(taken);
       else if (taken.length > 0) {
-        const { call } = options.carrier;
-        this.delivery.markCarried(
-          taken.map((each) => each.id),
-          call,
-        );
+        this.delivery.markCarried(taken.map((each) => each.id));
         await this.refresh(ids);
       }
       await this.delivery.consumeUnrequested([...idle]);
@@ -634,6 +730,23 @@ export class AgentService {
 
   // --- Internals ---
 
+  /** Whether the agent's latest answer finished after `entry`, rather
+   * than being cut short by an interrupt. */
+  private answeredAfter(agentId: string, entry: number): boolean {
+    const latest = this.projection.info(agentId)?.result;
+    return (
+      (latest?.stopReason === "stop" || latest?.stopReason === "length") &&
+      latest.entryId > entry
+    );
+  }
+
+  /** Whether the agent still awaits results of groups it spawned. */
+  private owesResults(agentId: string): boolean {
+    return obligationsOf(agentId, this.projection.graphs()).some(
+      (each) => each.presented === undefined,
+    );
+  }
+
   /** Names of visible agents and graphs, as the service last saw them. */
   private takenNames(): Set<string> {
     return new Set([
@@ -670,11 +783,163 @@ export class AgentService {
         if (rids.length > 0) await this.dropRequests(id, rids);
       if (stopped.length > 0) await this.store.clearPending(stopped);
       await this.closeEndedHelpers();
+      await this.cancelForFailures();
+      await this.presentResults();
       this.waits.check();
       this.delivery.schedule();
+      this.scheduleReconcile();
     });
     this.refreshChain = run.catch(() => {});
     return run;
+  }
+
+  private reconcileChain: Promise<void> = Promise.resolve();
+  private reconcileQueued = false;
+
+  /** Reconcile after the refresh, outside its chain, since stopping
+   * refreshes. */
+  private scheduleReconcile(): void {
+    if (this.reconcileQueued || this.closed) return;
+    const due =
+      Object.values(this.projection.graphs()).some(needsStop) ||
+      Object.entries(this.projection.agents()).some(
+        ([id, record]) =>
+          record.stopped && this.projection.info(id)?.state === "working",
+      );
+    if (!due) return;
+    this.reconcileQueued = true;
+    this.reconcileChain = this.reconcileChain
+      .then(async () => {
+        this.reconcileQueued = false;
+        await this.reconcile();
+      })
+      .catch((error) => this.onReport(error));
+  }
+
+  /**
+   * Stop withdrawn groups that still work, with their agents: their nodes'
+   * abort handlers withdraw the groups those agents spawned, so stops
+   * cascade down the tree, also after a crash. Groups stopped by request
+   * whose task still runs are aborted too.
+   */
+  private async reconcile(): Promise<void> {
+    for (const [id, graph] of Object.entries(this.projection.graphs())) {
+      if (this.closed) return;
+      if (!needsStop(graph)) continue;
+      if (await this.observer.isFinished(Number(id))) continue;
+      await this.harness.abortTask(taskId(id), CONTEXT);
+      await this.harness.waitForTask(taskId(id), CONTEXT);
+    }
+    // Stopped agents never work: what a crash or a race left running stops.
+    for (const [id, record] of Object.entries(this.projection.agents())) {
+      if (this.closed) return;
+      if (record.stopped && this.projection.info(id)?.state === "working")
+        await this.extensions.hub.turn(id, () => this.abortAgent(id));
+    }
+  }
+
+  /**
+   * An agent whose work failed no longer needs the results of the groups
+   * it spawned: withdraw them, so they stop. A graph's agent does the same
+   * through its node.
+   */
+  private async cancelForFailures(): Promise<void> {
+    for (const [id, record] of Object.entries(this.projection.agents())) {
+      if (record.stopped || !this.owesResults(id)) continue;
+      // A quick retry can replace the projected failure before refresh.
+      // Durable run boundaries preserve earlier work and exclude retries.
+      await this.store.cancelFailedGroups(id);
+    }
+  }
+
+  /**
+   * Hand finished groups' results to the agents that spawned them, once
+   * each, as input: an input entry carries the result, and its request ID
+   * names the attempt. A live `agent_wait` call that holds a result returns
+   * it instead. An interrupt that withdraws an attempt is a correction: the
+   * result waits until the agent answered after it, so it doesn't restart
+   * the work the user just stopped.
+   */
+  private async presentResults(): Promise<void> {
+    for (const [id, graph] of Object.entries(this.projection.graphs())) {
+      if (!isSpawned(graph) || graph.cancelled) continue;
+      if (graph.presented !== undefined) continue;
+      if (!(await this.observer.isFinished(Number(id)))) continue;
+      const ownerId = graph.owner.agent;
+      const owner = this.projection.agents()[ownerId];
+      if (!owner || owner.stopped) continue;
+      // A live agent_wait holds the result; its own result presents it.
+      if (
+        graph.claim !== undefined &&
+        !(await this.observer.isFinished(graph.claim))
+      )
+        continue;
+      // After an interrupt, results wait for the agent's next answer; the
+      // reservation checks again under the agent's turn.
+      if (
+        owner.interrupted !== undefined &&
+        !this.answeredAfter(ownerId, owner.interrupted)
+      )
+        continue;
+      const presented = await this.store.presentation(
+        ownerId,
+        graph.owner.since ?? 0,
+        id,
+      );
+      if (presented !== undefined) {
+        await this.store.markPresented(id, presented);
+        continue;
+      }
+      let attempt = graph.attempt ?? 1;
+      if (graph.attempt !== undefined) {
+        const rid = resultsRequestId(id, graph, graph.attempt);
+        const submission = await this.store.submission(ownerId, rid);
+        if (submission?.type === "input") {
+          if (submission.status !== "unanswered") continue;
+          if (graph.withdrawn === undefined) {
+            await this.store.markWithdrawn(
+              id,
+              await this.store.newestEntry(ownerId),
+            );
+            continue;
+          }
+          if (!this.answeredAfter(ownerId, graph.withdrawn)) continue;
+          attempt = graph.attempt + 1;
+        }
+      }
+      // Never queue behind a busy turn: an interrupt can hold it while
+      // aborting agent_stop, whose stop operation needs this refresh to
+      // finish. Retry later, checking all durable fences again.
+      await this.extensions.hub.tryTurn(
+        ownerId,
+        async () => {
+          const reserved = await this.store.reserveAttempt(id, attempt);
+          if (reserved === undefined) return;
+          const conversation = await this.harness.conversation(
+            conversationId(ownerId),
+            CONTEXT,
+          );
+          if (!conversation) return;
+          const { text } = await groupResult(
+            this.harness as unknown as Parameters<typeof groupResult>[0],
+            CONTEXT,
+            id,
+          );
+          const data: ResultsEntryData = { groups: [id] };
+          await conversation.submit(
+            {
+              type: "input",
+              content: `${RESULTS_PREFIX}${text}`,
+              whenBusy: "followUp",
+              requestId: resultsRequestId(id, graph, attempt),
+              entry: { kind: RESULTS_ENTRY, data },
+            },
+            CONTEXT,
+          );
+        },
+        () => this.scheduleRefresh(),
+      );
+    }
   }
 
   private async dropRequests(agentId: string, rids: string[]): Promise<void> {
@@ -683,19 +948,20 @@ export class AgentService {
   }
 
   /**
-   * Helpers leave the panel once the call that started them ended: their
-   * result reached the agent, or the agent was interrupted. Storage keeps
+   * Groups agents spawned leave the panel once they finished and their
+   * result reached the agent, or nobody needs it anymore. Storage keeps
    * them, and `/agents` shows them.
    */
   private async closeEndedHelpers(): Promise<void> {
     const ended: string[] = [];
     for (const [id, graph] of Object.entries(this.projection.graphs())) {
       if (!graph.owner || graph.closed) continue;
-      if (
-        (await this.observer.isFinished(Number(id))) &&
-        (await this.observer.isFinished(graph.owner.tool))
-      )
-        ended.push(id);
+      if (!(await this.observer.isFinished(Number(id)))) continue;
+      const done =
+        graph.presented !== undefined ||
+        graph.cancelled === true ||
+        this.projection.agents()[graph.owner.agent]?.stopped === true;
+      if (done) ended.push(id);
     }
     if (ended.length === 0) return;
     await this.store.closeGraphs(ended);
