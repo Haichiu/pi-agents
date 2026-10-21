@@ -12,6 +12,7 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CODEMODE_TOOL_NAME } from "@earendil-works/pi-durable/codemode";
+import type { AgentExtensionState } from "../hooks.js";
 import {
   DEFAULT_AGENT_TOOLS,
   isCodemodeModelTool,
@@ -34,6 +35,8 @@ import {
 } from "./types.js";
 
 export interface CreationDeps {
+  /** Once per spawn, before its commit; a graph's nodes share the result. */
+  captureExtensionState?: () => AgentExtensionState | undefined;
   harness: Harness;
   anchor: Conversation;
   extensions: AgentExtensions;
@@ -66,6 +69,7 @@ export async function createAgent(
   },
 ): Promise<string> {
   const { job, tools, first, request } = prepared;
+  const extensionState = deps.captureExtensionState?.();
   const createdAt = Date.now();
   return deps.harness.commit(async (tx) => {
     const state = await tx.doc(AgentsDoc);
@@ -92,6 +96,7 @@ export async function createAgent(
       createdAt,
       closed: false,
       ambientSkills: spec.ambientSkills ?? true,
+      ...(extensionState ? { extensionState } : {}),
       nextRequest: 2,
       requests: { [first]: request },
       delivered: [],
@@ -141,6 +146,8 @@ export async function createGraph(
   const inputs = resolveEdges(
     nodes.map((node) => ({ name: node.name, after: node.spec.after })),
   );
+  // Callbacks finish before any node exists. A failure creates nothing.
+  const extensionState = deps.captureExtensionState?.();
   const policy: GraphPolicy = spec.failFast ? "failFast" : "allSettled";
   const createdAt = Date.now();
   return deps.anchor.commit(async (tx) => {
@@ -187,6 +194,9 @@ export async function createGraph(
         createdAt,
         closed: false,
         ambientSkills: node.spec.ambientSkills ?? true,
+        ...(extensionState
+          ? { extensionState: structuredClone(extensionState) }
+          : {}),
         // The node sends the job; parent requests are later messages.
         nextRequest: 1,
         requests: {},

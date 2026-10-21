@@ -97,6 +97,34 @@ session. Only waits block; every other operation returns at once, and
 results arrive as messages. Agents start other agents only when they may
 delegate.
 
+## Extension hooks
+
+Agents run in pi-durable, outside Pi's extension runner, so Pi's own provider
+events never see their requests. Extension hooks are the bridge: co-loaded Pi
+extensions capture immutable, namespaced JSON state when agents are created
+and transform their outgoing model requests. The host connects these hooks to
+the agent runtime; the core stores opaque state without interpreting another
+extension's settings. The bridge stays thin on purpose: it carries state and
+payloads, nothing else, so the plumbing behind it can follow pi-durable as
+pi-durable gains native extension points, without changing the protocol.
+
+Creation captures a snapshot, rather than a live link to the parent. Changes
+to the parent affect future agents, not existing ones. A spawn captures once,
+before it commits: a graph's nodes share one snapshot, and helpers copy their
+creator's state without recapturing it. State is committed with creation and
+survives retries, compaction, stop/reopen, and session recovery. It lives in
+the agents' shared records, so it stays small.
+
+Request hooks use the actual dispatched model, so routing and a child's
+choice of provider do not accidentally apply the parent's model policy.
+Missing extensions leave their stored state intact but do not apply it.
+The integration is optional: it does not turn consumer extensions into
+runtime dependencies. Hook failures fail creation or the affected request,
+rather than silently dispatching a request without its intended policy. A
+broken or ambiguous registration, by contrast, costs only its own namespace,
+which then behaves like a missing extension: one faulty extension never
+disables agents.
+
 ## Graphs
 
 A graph runs on pi-durable's tasks and ownership tree, so its bookkeeping is

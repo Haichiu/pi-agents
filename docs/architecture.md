@@ -5,24 +5,29 @@ session file.
 
 ## Overview
 
-Agents run inside your Pi process. Pi-agents keeps one pi-durable harness per
-Pi session, with its own store, kept apart from Pi's session file:
+Agents run inside your Pi process. Pi-agents is a thin bridge from Pi to
+pi-durable: it keeps one pi-durable harness per Pi session, with its own store,
+kept apart from Pi's session file:
 
 ```text
 ╭─ Pi process ─────────────────────────────────────────────────────╮
 │                                                                  │
-│  ╭─────────────────────────────────────╮ ╭────────────────────╮  │
-│ ╭┤  ◆ Pi session: MCP, extension tools │ │  ▤ panel           │  │
-│ ┊╰───┬──────────▲──────────────────────╯ │  ⇄ attach view     │  │
-│ ┊    │ agent_*  │ results                │  ≡ /agents         │  │
-│ ┊    ▼          │                        │  ✉ /messages       │  │
-│ ┊╭──────────────┴───╮                    ╰─────────▲──────────╯  │
-│ ┊│  ✦ pi-agents     ├◀─────────────────────────────╯             │
-│ ┊╰───┬──────────▲───╯                                            │
-│ ┊    │ start    │ state                                          │
-│ ┊    │ message  │ results                                        │
-│ ┊    ▼ stop     │                                                │
-│ ┊╭──────────────┴─────────────────────────────────────────────╮  │
+│  ╭──────────────────╮ ╭────────────────────╮ ╭────────────────╮  │
+│ ╭┤ ◆ Pi session:    │ │ ◇ optional         │ │ ▤ panel        │  │
+│ ┊│   MCP, extension │ │   extensions, e.g. │ │ ⇄ attach view  │  │
+│ ┊│   tools          │ │   pi-service-tier  │ │ ≡ /agents      │  │
+│ ┊│                  │ │                    │ │ ✉ /messages    │  │
+│ ┊╰───┬─────────▲────╯ ╰─────────┬──────────╯ ╰────────▲───────╯  │
+│ ┊    │ agent_* │ results        ╎ hooks:              │          │
+│ ┊    │         │                ╎ capture at spawn,   │          │
+│ ┊    ▼         │                ▼ adapt requests      │          │
+│ ┊╭─────────────┴──────────────────────────────────────┴───────╮  │
+│ ┊│  ✦ pi-agents: a thin bridge from Pi to pi-durable          │  │
+│ ┊╰───┬─────────▲──────────────────────────────────────────────╯  │
+│ ┊    │ start   │ state                                           │
+│ ┊    │ message │ results                                         │
+│ ┊    ▼ stop    │                                                 │
+│ ┊╭─────────────┴──────────────────────────────────────────────╮  │
 │ ┊│  pi-durable harness                                        │  │
 │ ┊│                                                            │  │
 │ ┊│   ◉ scout ─── message ──▶ ● notes                          │  │
@@ -34,16 +39,17 @@ Pi session, with its own store, kept apart from Pi's session file:
 │ ┊│   ╰─────────────────────────────────╯                      │  │
 │ ┊│                                                            │  │
 │ ┊│   agents are conversations; turns, tool calls, and graphs  │  │
-│ ┊│   are durable tasks that own what they start               │  │
+│ ┊│   are durable tasks that own what they start; model        │  │
+│ ┊│   requests pass the hooks with each agent's snapshot       │  │
 │ ┊╰─────────────────────────────┬──────────────────────────────╯  │
 ╰─┬──────────────────────────────┬─────────────────────────────────╯
   ┊ saves                        │ checkpoint every step
   ▼                              ▼
 ╭──────────────────────╮    ╭──────────────────────────────╮
 │ ▤ Pi's session file  │    │ ▤ pi-agents store, one per   │
-│   your conversation, │    │   session: agents, graphs,   │
-│   saved results, and │    │   messages, tasks            │
-│   message cards      │    │                              │
+│   your conversation, │    │   session: agents and their  │
+│   saved results, and │    │   hook snapshots, graphs,    │
+│   message cards      │    │   messages, tasks            │
 ╰──────────────────────╯    ╰──────────────────────────────╯
 ```
 
@@ -54,6 +60,12 @@ all of its agents, and an agent that delegates starts its helpers as a graph
 owned by the tool call that waits for them. A message from one agent to
 another is an input to the recipient's conversation, sent by the sender's
 tool call.
+
+Agents run outside Pi's extension runner, so Pi's extension events, such as
+`before_provider_request`, don't see their requests. Optional extensions reach
+them through [creation and request hooks](#creation-and-request-hooks)
+instead: a snapshot captured when an agent is created, stored with the agent,
+and applied to each of its model requests.
 
 Every step is a commit to the pi-agents store. When you resume a session,
 tasks continue where they stopped: agents that finished don't work again, and
@@ -96,6 +108,15 @@ Sessions started with `--no-session` keep agents in memory.
 Co-loaded extensions can observe child agents through `pi.events`, without
 parsing the panel or footer. These events describe children, not the parent
 Pi session's `agent_start` and `agent_settled` lifecycle.
+
+### Creation and request hooks
+
+Extensions can also initialize persistent, namespaced state at agent creation
+and transform child model requests with `onAgentCreate` and `onAgentRequest`.
+These callbacks are separate from the notification events described here.
+They carry JSON state and provider payloads only; they don't give agents
+tools. See [Agent extension hooks](./hooks.md) for the optional protocol,
+inheritance, and error handling.
 
 ### State snapshots
 
