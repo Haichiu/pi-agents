@@ -1,0 +1,9 @@
+created: 2026-10-21
+title: Interrupt agents with corrective messages
+intro: >-
+  Pi can now interrupt a working agent and deliver a corrective message in one step.
+  Choose whether a message should steer current work, wait for it to finish, or interrupt
+  it first.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.36.0
