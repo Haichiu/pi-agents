@@ -54,6 +54,25 @@ working-agent cap. The lifetime limit includes completed and cancelled
 children and never replenishes. See
 [agents that spawn agents](./graphs.md#agents-that-spawn-agents).
 
+## Pi settings agents follow
+
+Agents follow your Pi settings for provider retries and timeouts, retries
+after errors, compaction, and how steering and follow-up messages queue.
+They read them when the session first uses agents, so restart Pi after
+changing them.
+
+Compaction follows Pi's per-model token settings too: an agent on a model
+listed in `compaction.modelOverrides` compacts with that entry's
+`reserveTokens` and `keepRecentTokens`, keyed by the exact
+`provider/modelId`. Pi's [settings reference](https://pi.dev/docs/latest/settings#per-model-compaction-overrides)
+describes them.
+
+Agents' model requests identify themselves to providers as Pi's do. While
+Pi's install telemetry is on, which the `enableInstallTelemetry` setting or
+the `PI_TELEMETRY` environment variable controls, requests to OpenRouter,
+NVIDIA NIM, and OpenCode name Pi as the app that sent them; with it off,
+they name no app.
+
 ## Storage retention
 
 [Agent storage](./architecture.md#storage) remains after Pi deletes its

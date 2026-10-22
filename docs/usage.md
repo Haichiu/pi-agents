@@ -39,6 +39,22 @@ then shows the state of its last agents: failed if one failed or was skipped,
 interrupted if one was interrupted or stopped, and idle otherwise. Once its
 result reaches its owner, it shows ◌ as well.
 
+When an agent's context compaction fails, the agent keeps its state and
+keeps working, but its line shows `compaction failed`, and `/agents` and
+the attach view show the error. The warning stays until a later compaction
+succeeds, since the agent's context may overflow meanwhile. Pi sees it in
+`agent_status` too.
+
+Pi resumes unfinished work after a crash. When Pi crashes or is killed
+several times in a row while an agent works, without the agent getting any
+further, the agent's work stops resuming by itself, so work that crashes Pi
+doesn't crash it again forever. The agent then stays `working` but shows
+`stalled after repeated crashes`. Open `/agents`, select it, and press `r` to
+retry it, or `s` to stop it; Esc in the attach view interrupts it. A wait for
+a stalled agent waits until you retry it or its timeout ends. An agent whose
+unfinished work this version of pi-agents can't run shows `stalled: needs
+another pi-agents version` until you switch back or stop it.
+
 ## Tools available to agents
 
 Agents use `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, and
@@ -48,11 +64,16 @@ profile or spawn specifies others. They can't use MCP servers or tools
 from other extensions.
 
 `read` supports images. Codemode scripts can call the agent's other tools,
-except `agent_wait`, which the agent's model must call directly. Scripts can
-also use [`models`](https://pi.dev/docs/latest/codemode#models) to list models,
-run classifiers, and generate images. These calls count toward the agent's
-usage. Agents start agents of their own only when you let them
-[spawn](./graphs.md#agents-that-spawn-agents).
+except `agent_wait`, which the agent's model must call directly. Scripts get
+the agent tools' results as data: `agent_status` lists `agents` with their
+`name`, `state`, `model`, and `job`; `agent_send` returns the recipient as
+`to`, the `mode`, whether it `interrupted` the recipient, and how many
+queued messages it `dropped`; and `agent_spawn` returns the `group` and its
+`agents`, each with `id` and `name`. A refused call rejects with its reason.
+Scripts can also use [`models`](https://pi.dev/docs/latest/codemode#models)
+to list models, run classifiers, and generate images. These calls count
+toward the agent's usage. Agents start agents of their own only when you let
+them [spawn](./graphs.md#agents-that-spawn-agents).
 
 ## Skills
 
@@ -138,15 +159,18 @@ In the focused panel:
 | `s` | Stop the agent, or the graph with its agents. Pi asks first when it still works. |
 | Esc or → | Go back to the editor. Other keys go back too and act there, so typed or pasted text lands in the editor. |
 
-Attaching opens the agent's conversation. The editor names the agent and
-sends your input to it:
+Attaching opens the agent's conversation. A `codemode` call shows its
+script, then each tool call the script made with its status, as the calls
+run and after the script finished, and then the script's output. The
+editor names the agent and sends your input to it:
 
 | Key | Action |
 | --- | --- |
 | ⏎ | Prompt an idle agent or steer a working one. An agent that waits for the agents its job needs takes input once it starts. |
 | Alt+⏎ | Queue a follow-up after the current answer. |
 | Esc | Interrupt a working agent; queued messages return to the editor. Go back from an idle one when the editor is empty. |
-| Ctrl+O | Expand or collapse tool output. |
+| Ctrl+O | Expand or collapse all tool output and messages. |
+| Click | Expand or collapse one tool result or message, as in Pi. Click the newer-lines note to jump back to new output. Needs fullscreen mode. |
 | ← or Ctrl+D | Detach when the editor is empty. |
 | Shift+↑ ↓, Shift+PgUp/PgDn | Scroll. |
 | Mouse wheel | Scroll in fullscreen mode, with the pointer over the attached view. |
@@ -179,7 +203,7 @@ the new session.
 
 | Command | Action |
 | --- | --- |
-| `/agents` | Browse all agents and graphs, including ended ones, with their jobs and latest results. Attach to, fold, or stop them. |
+| `/agents` | Browse all agents and graphs, including ended ones, with their jobs and latest results. Attach to, fold, retry, or stop them. |
 | `/agent <name>` | Attach to an agent. |
 | `/messages` | Read and filter the messages agents sent each other, newest first. |
 

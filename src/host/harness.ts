@@ -9,12 +9,13 @@
  */
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Models } from "@earendil-works/pi-ai";
+import type { ClientIdentity, Models } from "@earendil-works/pi-ai";
 import {
   type Conversation,
   createRegistry,
   Harness,
   type HarnessSettings,
+  type ReportInfo,
   type Storage,
 } from "@earendil-works/pi-durable";
 import {
@@ -22,6 +23,7 @@ import {
   agentSelection,
   installAgentExtensions,
 } from "../agents/extensions.js";
+import type { HarnessReport } from "../agents/failures.js";
 import type { AgentHooks } from "../hooks.js";
 import { ExecutionEnvs } from "./harness-setup.js";
 import { AgentRequestHooks } from "./hooks.js";
@@ -31,12 +33,42 @@ const CONTEXT = BACKGROUND_CONTEXT;
 export interface AgentHarnessOptions {
   storage: Storage;
   models: Models;
+  /** How model requests of generation, compaction, and tools identify
+   * themselves; replaces the identity of `models`. */
+  identity: ClientIdentity;
   /** Fallback working directory for agents without one. */
   cwd: string;
   extensions: AgentExtensions;
   settings?: HarnessSettings;
   lifecycle?: { sessionId: string; hooks: readonly AgentHooks[] };
-  onReport?: (error: unknown) => void;
+  onReport?: (report: HarnessReport) => void;
+}
+
+/** A harness report as plain data, without pi-durable's types. */
+export function plainReport(error: unknown, info: ReportInfo): HarnessReport {
+  const task =
+    "task" in info && info.task
+      ? {
+          task: {
+            id: String(info.task.id),
+            kind: info.task.kind,
+            conversation: String(info.task.conversationId),
+          },
+        }
+      : {};
+  return {
+    error,
+    type: info.type,
+    ...task,
+    ...("conversationId" in info && info.conversationId !== undefined
+      ? { conversation: String(info.conversationId) }
+      : {}),
+    ...("extension" in info && info.extension
+      ? { extension: info.extension }
+      : {}),
+    ...("callback" in info ? { callback: info.callback } : {}),
+    ...("reason" in info ? { reason: info.reason } : {}),
+  };
 }
 
 export interface AgentHarness {
@@ -61,6 +93,7 @@ export async function openAgentHarness(
         options.lifecycle.hooks,
       )
     : undefined;
+  const extensions = agentSelection(options.extensions);
   let harness: Harness | undefined;
   let unobserve: (() => void) | undefined;
   try {
@@ -68,14 +101,21 @@ export async function openAgentHarness(
       options.storage,
       {
         models: requests?.models ?? options.models,
+        identity: options.identity,
         registry,
-        settings: {
+        // Read at each use, so getters of the given settings are too.
+        settings: () => ({
           ...options.settings,
           // Agents select their own extensions; the anchor uses this default.
-          extensions: agentSelection(options.extensions),
-        },
+          extensions,
+        }),
         env: envs.env,
-        ...(options.onReport ? { onReport: options.onReport } : {}),
+        ...(options.onReport
+          ? {
+              onReport: (error: unknown, info: ReportInfo) =>
+                options.onReport?.(plainReport(error, info)),
+            }
+          : {}),
       },
       CONTEXT,
     );

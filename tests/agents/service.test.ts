@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
   fauxAssistantMessage,
   fauxProvider,
 } from "@earendil-works/pi-ai/providers/faux";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import type { AgentService } from "../../src/agents/service.js";
 import { WaitInterrupted } from "../../src/agents/types.js";
 import { formatAgentLine } from "../../src/ui/format.js";
@@ -16,6 +18,7 @@ import {
   createFaux,
   createGatedFaux,
   heldUntilAborted,
+  hostOf,
   jsonlStorage,
   lastUserText,
   MODEL,
@@ -308,6 +311,54 @@ describe("AgentService", () => {
     ).toBe("done: [user] continue");
   });
 
+  test("a failed compaction warns until one succeeds, and the agent stays usable", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    let failSummaries = true;
+    faux.setResponses(
+      Array.from({ length: 20 }, () => (context) => {
+        const summary = context.messages.some(
+          (message) =>
+            message.role === "system" &&
+            String(message.content).includes("context summarization"),
+        );
+        if (summary && failSummaries)
+          return fauxAssistantMessage("", {
+            stopReason: "error",
+            errorMessage: "summary refused",
+          });
+        return fauxAssistantMessage(
+          summary ? "## Goal\nsummary" : `done: ${lastUserText(context)}`,
+        );
+      }),
+    );
+    const service = await open({
+      models,
+      // Keep almost nothing, so a short conversation has something to
+      // summarize.
+      settings: {
+        retry: { enabled: false },
+        compaction: { keepRecentTokens: 1 },
+      },
+    });
+    await service.spawnGraph({
+      agents: [{ job: "first", name: "w", cwd: ".", model: MODEL }],
+    });
+    await service.wait(["w"]);
+    const conversation = await hostOf(service).harness.harness.conversation(
+      Number(service.get("w")?.id) as ConversationId,
+      BACKGROUND_CONTEXT,
+    );
+    await conversation?.compact(undefined, BACKGROUND_CONTEXT);
+    await until(() => service.get("w")?.compactionFailure !== undefined);
+    expect(service.get("w")?.compactionFailure).toContain("summary refused");
+    expect(service.get("w")?.state).toBe("idle");
+    failSummaries = false;
+    await conversation?.compact(undefined, BACKGROUND_CONTEXT);
+    await until(() => service.get("w")?.compactionFailure === undefined);
+  });
+
   test("interrupt aborts work without delivering", async () => {
     let started = false;
     const { models } = createFaux(
@@ -479,6 +530,27 @@ describe("durability", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(third.pendingDeliveries()).toEqual([]);
     expect(third.get("w")?.state).toBe("idle");
+  });
+
+  test("work that crashes too often stalls until retried", async () => {
+    const directory = tempDir();
+    const worker = fileURLToPath(new URL("./crash-worker.ts", import.meta.url));
+    const crashed = Bun.spawn(["bun", worker, directory], { stdout: "ignore" });
+    expect(await crashed.exited).toBe(0);
+
+    const service = await open({
+      storage: await jsonlStorage(directory),
+      models: createFaux().models,
+      // Park work at the first crash instead of the fifth.
+      settings: { restartLimit: 1 },
+    });
+    await until(() => service.get("victim")?.stalled === "crashed");
+    expect(service.get("victim")?.state).toBe("working");
+    expect(await service.retry("victim")).toBeGreaterThan(0);
+    await service.wait(["victim"]);
+    expect(service.get("victim")?.result?.text).toBe("done: hold");
+    expect(service.get("victim")?.stalled).toBeUndefined();
+    await expect(service.retry("victim")).rejects.toThrow("no stalled work");
   });
 
   test("a crash while stopping an agent resumes nothing below it", async () => {

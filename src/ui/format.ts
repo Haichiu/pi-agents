@@ -11,6 +11,7 @@ import {
   type AgentUsage,
   formatModelRef,
   type GraphInfo,
+  type Stall,
 } from "../agents/types.js";
 
 export type Colorize = (
@@ -90,6 +91,15 @@ export function statusCounts(
 /** What a call's wait gave up on before it finished: the call's outcome
  * for it, which stays true. */
 export const WAIT_ENDED_STYLE = { icon: "⊠", color: "warning" } as const;
+
+/** What a stalled agent or graph says about its work. */
+export const STALL_NOTES: Record<Stall, string> = {
+  crashed: "stalled after repeated crashes",
+  incompatible: "stalled: needs another pi-agents version",
+};
+
+/** The note on agents whose latest compaction failed. */
+export const COMPACTION_FAILED = "compaction failed";
 
 /** The note on agents and graphs whose result waits for the parent. */
 export const QUEUED_NOTE = "result queued";
@@ -191,6 +201,7 @@ export function shortModel(info: Pick<AgentInfo, "model">): string {
 /** What the agent is doing right now, for working agents. */
 function activityText(info: AgentInfo, now: number): string | undefined {
   if (info.state !== "working") return undefined;
+  if (info.stalled) return STALL_NOTES[info.stalled];
   const silent = now - info.lastActivityAt;
   if (silent >= STALL_AFTER_MS)
     return `no activity for ${formatElapsed(silent)}`;
@@ -235,7 +246,17 @@ export function formatAgentLine(
       : undefined,
     usage ? color("dim", usage) : undefined,
     activity
-      ? color(info.state === "failed" ? "error" : "dim", oneLine(activity, 120))
+      ? color(
+          info.state === "failed"
+            ? "error"
+            : info.stalled && info.state === "working"
+              ? "warning"
+              : "dim",
+          oneLine(activity, 120),
+        )
+      : undefined,
+    info.compactionFailure !== undefined
+      ? color("warning", COMPACTION_FAILED)
       : undefined,
   ]
     .filter((part): part is string => part !== undefined)
@@ -302,6 +323,9 @@ export function formatGraphLine(
       : undefined,
     usage ? color("dim", usage) : undefined,
     note ? color(graph.state === "failed" ? "error" : "dim", note) : undefined,
+    graph.stalled && graph.state === "working"
+      ? color("warning", STALL_NOTES[graph.stalled])
+      : undefined,
     graph.queued ? color("dim", QUEUED_NOTE) : undefined,
   ]
     .filter((part): part is string => part !== undefined)

@@ -20,6 +20,8 @@ import { CONTEXT, contextFor, conversationId, taskId } from "./context.js";
 import { type CreationDeps, createGraph } from "./creation.js";
 import { Delivery } from "./delivery.js";
 import type { AgentExtensions } from "./extensions.js";
+import { describeReport, type HarnessReport } from "./failures.js";
+import { userInput } from "./inputs.js";
 import { MessageLog } from "./message-log.js";
 import { queuedMessages } from "./messaging.js";
 import {
@@ -39,6 +41,7 @@ import {
   resultsRequestId,
 } from "./records.js";
 import { groupResult } from "./spawning.js";
+import { type StalledTask, TaskStalls } from "./stalls.js";
 import { AgentStore } from "./store.js";
 import {
   AgentError,
@@ -53,7 +56,6 @@ import {
   type Target,
   type TargetRef,
   type TaskNode,
-  USER_MESSAGE_PREFIX,
   WaitInterrupted,
   whenBusyOf,
 } from "./types.js";
@@ -122,6 +124,7 @@ export class AgentService {
   private readonly projection: Projection;
   private readonly messageLog: MessageLog;
   private readonly observer: HarnessObserver;
+  private readonly stalls: TaskStalls;
   private readonly store: AgentStore;
   private readonly harness: Harness;
   private readonly extensions: AgentExtensions;
@@ -150,11 +153,15 @@ export class AgentService {
       isMessagesDirty: () => this.messageLog.isDirty(),
       agentIds: () => Object.keys(this.projection.agents()),
     });
+    this.stalls = new TaskStalls(this.harness, (changed) =>
+      this.onStallsChanged(changed),
+    );
     this.projection = new Projection({
       harness: this.harness,
       store: this.store,
       observer: this.observer,
       carried: (id) => this.delivery.carried(id),
+      stalls: this.stalls,
     });
     this.waits = new Waits({
       projection: this.projection,
@@ -206,6 +213,7 @@ export class AgentService {
     // Before observing, whose refreshes can resume scheduling.
     const stopped = await this.markStoppedWork();
     this.observer.start();
+    await this.stalls.start();
     await this.projection.reload();
     for (const id of stopped) await this.abortAgent(id);
     for (const id of Object.keys(this.projection.agents())) {
@@ -234,7 +242,12 @@ export class AgentService {
     if (stopped.size === 0) return [];
     const tasks = await this.harness.commit(async (tx) => {
       const found: Array<{ id: TaskId; agent: string }> = [];
-      for (const status of ["pending", "running", "waiting"] as const) {
+      for (const status of [
+        "pending",
+        "running",
+        "waiting",
+        "sleeping",
+      ] as const) {
         let cursor: Cursor | undefined;
         do {
           const query = { status, background: false };
@@ -265,6 +278,7 @@ export class AgentService {
     };
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.observer.stop();
+    this.stalls.stop();
     this.unsubscribeParent?.();
     this.listeners.clear();
     this.waits.check();
@@ -523,11 +537,59 @@ export class AgentService {
     await conversation.submit(
       {
         type: "input",
-        content: `${USER_MESSAGE_PREFIX}${text}`,
+        ...userInput(text),
         whenBusy: mode === "followUp" ? "followUp" : "steer",
       },
       CONTEXT,
     );
+  }
+
+  /**
+   * Run the stalled work of an agent or graph again: the tasks that crashes
+   * cut off too often in a row, of the agent or the graph's agents, and of
+   * everything they spawned. Returns how many tasks run again.
+   */
+  async retry(nameOrId: string): Promise<number> {
+    const target = this.requireTarget(nameOrId);
+    const below = this.projection.below(
+      target.kind === "agent"
+        ? [target.info.id]
+        : target.info.nodes.map((node) => node.agentId),
+    );
+    const tasks = this.projection.stalledTasks(below.agents, [
+      ...(target.kind === "graph" ? [target.info.id] : []),
+      ...below.graphs,
+    ]);
+    if (tasks.length === 0)
+      throw new AgentError(`${target.info.name} has no stalled work`);
+    const retried = await this.stalls.retry(tasks);
+    if (retried === 0)
+      throw new AgentError(
+        `${target.info.name} can't run with this version of pi-agents; stop it instead`,
+      );
+    return retried;
+  }
+
+  /**
+   * A harness report as a notice that names the agent or graph it is
+   * about; undefined when another notice covers it.
+   */
+  describeReport(report: HarnessReport): string | undefined {
+    return describeReport(report, ({ conversation, task }) => {
+      const agent =
+        conversation === undefined
+          ? undefined
+          : this.projection.info(conversation);
+      if (agent) return `Agent ${agent.name}`;
+      if (task === undefined) return undefined;
+      const graph = this.projection.graphInfo(task);
+      if (graph) return `Graph ${graph.name}`;
+      const node = this.projection
+        .graphOfNode(Number(task))
+        ?.nodes.find((each) => each.task === Number(task));
+      const owner = node ? this.projection.info(node.agent) : undefined;
+      return owner ? `Agent ${owner.name}` : undefined;
+    });
   }
 
   /** Abort the agent's current work and withdraw its queued messages. */
@@ -804,6 +866,20 @@ export class AgentService {
     return this.list()
       .filter((info) => info.closed)
       .map((info) => info.name);
+  }
+
+  /** Agents whose tasks stalled or run again show it at the next
+   * refresh; graphs refresh every time. */
+  private onStallsChanged(changed: readonly StalledTask[]): void {
+    const agents = this.projection.agents();
+    for (const task of changed) {
+      if (agents[task.conversation]) this.observer.markDirty(task.conversation);
+      const node = this.projection
+        .graphOfNode(Number(task.id))
+        ?.nodes.find((each) => each.task === Number(task.id));
+      if (node) this.observer.markDirty(node.agent);
+    }
+    this.scheduleRefresh();
   }
 
   private scheduleRefresh(): void {
