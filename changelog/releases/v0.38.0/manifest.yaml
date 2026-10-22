@@ -1,0 +1,10 @@
+created: 2026-10-22
+title: Agent recovery and richer tool views on Pi 1.4.0
+intro: >-
+  You can now retry agents stalled by repeated crashes, inspect script tool calls
+  in the attached view, and use structured agent results in codemode scripts. This
+  release requires Pi 1.4.0 or later and adds per-model compaction settings and clearer
+  failure notices.
+source:
+  mode: sync-stable-queue
+  previous_stable: v0.37.0
