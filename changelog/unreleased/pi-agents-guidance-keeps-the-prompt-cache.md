@@ -3,6 +3,8 @@ title: Agent guidance keeps the prompt cache
 type: bugfix
 authors:
   - Haichiu
+prs:
+  - 118
 created: 2026-10-26T13:30:00.000000Z
 ---
 

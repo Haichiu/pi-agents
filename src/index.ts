@@ -117,9 +117,7 @@ export default function agentExtension(pi: ExtensionAPI): void {
       ctx.scopedModels,
       ctx.mode === "print" || ctx.mode === "json",
     );
-    // A prompt section, not a returned systemPrompt: a returned prompt makes Pi
-    // resend the whole leading prompt, so any later section change breaks the
-    // provider's prompt cache. A section lets Pi append a small delta instead.
+    // A section, unlike a returned systemPrompt, keeps the prompt cache.
     event.systemPromptOptions.sections["pi-agents"] = appendix;
   });
 
